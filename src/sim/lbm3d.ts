@@ -80,7 +80,7 @@ export class LBM3D {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    // Macros 3D texture
+    // Macros 3D texture (rgba16float, channels = u.x, u.y, u.z, rho).
     this.macrosTex = this.device.createTexture({
       size: [this.W, this.H, this.D],
       dimension: '3d',
