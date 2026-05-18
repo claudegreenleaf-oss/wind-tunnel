@@ -201,17 +201,36 @@ export class VolumeRenderer {
     });
   }
 
-  /** Call after obtaining the macros and dye texture views. */
+  private bgl: GPUBindGroupLayout | null = null;
+
+  /** Call after obtaining the macros and dye texture views. Updates bind group; pipeline built once. */
   setTextures(macrosView: GPUTextureView, dyeView: GPUTextureView) {
     this.macrosView = macrosView;
     this.dyeView = dyeView;
-    this.buildPipeline();
+    if (!this.pipeline) {
+      this.buildPipeline();
+    } else {
+      this.rebuildBindGroup();
+    }
+  }
+
+  private rebuildBindGroup() {
+    if (!this.macrosView || !this.dyeView || !this.bgl) return;
+    this.bindGroup = this.device.createBindGroup({
+      layout: this.bgl,
+      entries: [
+        { binding: 0, resource: this.macrosView },
+        { binding: 1, resource: this.dyeView },
+        { binding: 2, resource: { buffer: this.uniformBuf } },
+        { binding: 3, resource: this.sampler },
+      ],
+    });
   }
 
   private buildPipeline() {
     if (!this.macrosView || !this.dyeView) return;
 
-    const bgl = this.device.createBindGroupLayout({
+    this.bgl = this.device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '3d' } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '3d' } },
@@ -220,21 +239,13 @@ export class VolumeRenderer {
       ],
     });
 
-    this.bindGroup = this.device.createBindGroup({
-      layout: bgl,
-      entries: [
-        { binding: 0, resource: this.macrosView },
-        { binding: 1, resource: this.dyeView },
-        { binding: 2, resource: { buffer: this.uniformBuf } },
-        { binding: 3, resource: this.sampler },
-      ],
-    });
+    this.rebuildBindGroup();
 
     const vertModule = this.device.createShaderModule({ code: VOLUME_VERT_WGSL, label: 'volume-vert' });
     const fragModule = this.device.createShaderModule({ code: VOLUME_FRAG_WGSL, label: 'volume-frag' });
 
     this.pipeline = this.device.createRenderPipeline({
-      layout: this.device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.bgl] }),
       vertex: {
         module: vertModule,
         entryPoint: 'vs_main',
@@ -252,7 +263,7 @@ export class VolumeRenderer {
       },
       primitive: {
         topology: 'triangle-list',
-        cullMode: 'front', // cull front faces so we shade from inside
+        cullMode: 'front',
       },
     });
   }
