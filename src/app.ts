@@ -251,6 +251,84 @@ export class App {
       }
     });
 
+    // Slow-mo toggle
+    const slowmoBtn = q<HTMLButtonElement>('#btn-slowmo');
+    let slowmoActive = false;
+    slowmoBtn.addEventListener('click', () => {
+      slowmoActive = !slowmoActive;
+      this.config.simSpeed = slowmoActive ? 0.25 : 1.0;
+      speedMul.value = String(this.config.simSpeed);
+      speedMulVal.textContent = `${this.config.simSpeed.toFixed(2)}×`;
+      slowmoBtn.textContent = slowmoActive ? 'Slow-mo: On' : 'Slow-mo';
+      slowmoBtn.classList.toggle('active', slowmoActive);
+    });
+
+    // Physics: gravity sliders
+    const gravX = q<HTMLInputElement>('#sl-grav-x');
+    const gravY = q<HTMLInputElement>('#sl-grav-y');
+    const gravZ = q<HTMLInputElement>('#sl-grav-z');
+    const gravXVal = q<HTMLSpanElement>('#val-grav-x');
+    const gravYVal = q<HTMLSpanElement>('#val-grav-y');
+    const gravZVal = q<HTMLSpanElement>('#val-grav-z');
+    const updateGrav = () => {
+      this.config.gravity = [
+        parseFloat(gravX.value),
+        parseFloat(gravY.value),
+        parseFloat(gravZ.value),
+      ];
+      gravXVal.textContent = this.config.gravity[0].toFixed(5);
+      gravYVal.textContent = this.config.gravity[1].toFixed(5);
+      gravZVal.textContent = this.config.gravity[2].toFixed(5);
+      if (this.lbm) this.lbm.gravity = this.config.gravity;
+    };
+    gravX.addEventListener('input', updateGrav);
+    gravY.addEventListener('input', updateGrav);
+    gravZ.addEventListener('input', updateGrav);
+
+    // Physics: MRT/TRT toggle
+    const mrtBtn = q<HTMLButtonElement>('#btn-mrt');
+    mrtBtn.addEventListener('click', () => {
+      this.config.useMRT = !this.config.useMRT;
+      if (this.lbm) this.lbm.useMRT = this.config.useMRT ? 1 : 0;
+      mrtBtn.textContent = this.config.useMRT ? 'Collision: MRT' : 'Collision: BGK';
+      mrtBtn.classList.toggle('active', this.config.useMRT);
+    });
+
+    // Physics: LES toggle
+    const lesBtn = q<HTMLButtonElement>('#btn-les');
+    lesBtn.addEventListener('click', () => {
+      this.config.useLES = !this.config.useLES;
+      if (this.lbm) this.lbm.useLES = this.config.useLES ? 1 : 0;
+      lesBtn.textContent = this.config.useLES ? 'Turbulence: LES' : 'Turbulence: Off';
+      lesBtn.classList.toggle('active', this.config.useLES);
+    });
+
+    // Physics: free-slip wall toggle
+    const slipBtn = q<HTMLButtonElement>('#btn-slip');
+    slipBtn.addEventListener('click', () => {
+      this.config.freeSlip = !this.config.freeSlip;
+      if (this.lbm) this.lbm.freeSlip = this.config.freeSlip ? 1 : 0;
+      slipBtn.textContent = this.config.freeSlip ? 'Walls: Free-slip' : 'Walls: No-slip';
+      slipBtn.classList.toggle('active', this.config.freeSlip);
+    });
+
+    // Tools: inject
+    const injectBtn = q<HTMLButtonElement>('#btn-inject');
+    const injectModeBtn = q<HTMLButtonElement>('#btn-inject-mode');
+    injectBtn.addEventListener('click', () => {
+      this._injectActive = !this._injectActive;
+      injectBtn.textContent = this._injectActive ? 'Inject: On' : 'Inject: Off';
+      injectBtn.classList.toggle('active', this._injectActive);
+      injectModeBtn.disabled = !this._injectActive;
+      if (this.controls) this.controls.enabled = !this._injectActive;
+    });
+    injectModeBtn.addEventListener('click', () => {
+      this._injectMode = this._injectMode === 'impulse' ? 'dye' : 'impulse';
+      injectModeBtn.textContent = `Mode: ${this._injectMode === 'impulse' ? 'Impulse' : 'Dye'}`;
+    });
+
+    this.wireInject();
+
     this.refreshReHud();
   }
 
@@ -600,6 +678,11 @@ export class App {
   };
 
   private subAccum = 0;
+
+  /** Placeholder for Track C canvas click-inject wiring. */
+  private wireInject() {
+    // Track C will implement canvas mousedown/mousemove handlers here.
+  }
 
   /** Placeholder for Track C inject pipeline setup. Fields kept here to avoid TS errors. */
   private buildInjectPipeline(_device: GPUDevice) {
