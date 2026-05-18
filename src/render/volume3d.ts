@@ -77,16 +77,16 @@ struct FragIn {
   @location(0) worldPos  : vec3<f32>,
 }
 
-// Viridis-inspired color ramp: dark-purple → blue → teal → green → yellow
-fn viridis(t : f32) -> vec3<f32> {
-  let c0 = vec3(0.267, 0.004, 0.329);
-  let c1 = vec3(0.127, 0.566, 0.551);
-  let c2 = vec3(0.993, 0.906, 0.144);
+// Inferno-style ramp: deep blue → magenta → orange → yellow → white
+fn inferno(t : f32) -> vec3<f32> {
   let tt = clamp(t, 0.0, 1.0);
-  if tt < 0.5 {
-    return mix(c0, c1, tt * 2.0);
-  }
-  return mix(c1, c2, (tt - 0.5) * 2.0);
+  let c0 = vec3(0.04, 0.05, 0.20);
+  let c1 = vec3(0.55, 0.06, 0.55);
+  let c2 = vec3(1.00, 0.40, 0.30);
+  let c3 = vec3(1.00, 0.92, 0.55);
+  if tt < 0.33 { return mix(c0, c1, tt * 3.0); }
+  if tt < 0.66 { return mix(c1, c2, (tt - 0.33) * 3.0); }
+  return mix(c2, c3, (tt - 0.66) * 3.0);
 }
 
 // Ray-AABB intersection. Returns vec2(t_near, t_far); t_far < t_near means miss.
@@ -130,22 +130,22 @@ fn fs_main(in : FragIn) -> @location(0) vec4<f32> {
 
     let macros  = textureSampleLevel(macrosTex, linearSamp, uvw, 0.0);
     let speed   = length(macros.xyz);
-    // map speed 0..0.15 to 0..1
-    let speedN  = clamp(speed / 0.15, 0.0, 1.0);
-    let speedColor = viridis(speedN);
+    let speedN  = clamp(speed / 0.18, 0.0, 1.0);
+    let speedColor = inferno(speedN);
 
-    // Sample dye
     let dye = textureSampleLevel(dyeTex, linearSamp, uvw, 0.0);
     let dyeIntensity = clamp(length(dye.rgb), 0.0, 1.5);
 
-    let density = speedN * 0.4 + dyeIntensity * 0.6;
-    let alpha   = 1.0 - exp(-density * stepSize * 0.3);
+    // Per-step alpha kept small so dye-filled regions don't occlude the
+    // rest of the volume; total opacity emerges from many small samples.
+    let alpha = clamp(dyeIntensity * 0.08 + speedN * 0.025, 0.0, 0.35);
 
-    let blendedColor = mix(speedColor, dye.rgb, clamp(dyeIntensity, 0.0, 1.0));
-    accumColor += transmit * alpha * blendedColor;
+    // Color: dye glows, with a hint of speed-color where the flow is fast.
+    let glow = dye.rgb * 1.5 + speedColor * speedN * 0.6;
+    accumColor += transmit * alpha * glow;
     transmit   *= 1.0 - alpha;
 
-    if transmit < 0.01 { break; }
+    if transmit < 0.02 { break; }
   }
 
   return vec4(accumColor, 1.0 - transmit);

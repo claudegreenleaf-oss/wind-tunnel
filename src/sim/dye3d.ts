@@ -25,8 +25,8 @@ export class DyeField3D {
   private currentIsA = true;
   private getMacrosView: () => GPUTextureView;
 
-  decay = 0.995;
-  injectAmount = 1.0;
+  decay = 0.992;       // moderate persistence so streaks fade gracefully downstream
+  injectAmount = 0.7;  // softer injection so we don't saturate at the inlet
 
   constructor(device: GPUDevice, W: number, H: number, D: number, getMacrosView: () => GPUTextureView) {
     this.device = device;
@@ -149,11 +149,11 @@ export class DyeField3D {
     ap.dispatchWorkgroups(Math.ceil(this.W / 4), Math.ceil(this.H / 4), Math.ceil(this.D / 4));
     ap.end();
 
-    // Inject pass (only first 4 x-slices, rest ignored by shader)
+    // Inject pass — workgroup is (4,4,4), shader self-limits to first 14 cells along X
     const ip = enc.beginComputePass();
     ip.setPipeline(this.injectPipeline);
     ip.setBindGroup(0, injectBG);
-    ip.dispatchWorkgroups(1, Math.ceil(this.H / 8), Math.ceil(this.D / 8));
+    ip.dispatchWorkgroups(Math.ceil(16 / 4), Math.ceil(this.H / 4), Math.ceil(this.D / 4));
     ip.end();
 
     this.device.queue.submit([enc.finish()]);

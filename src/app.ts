@@ -8,6 +8,7 @@ import { defaultConfig, latticeDims, computeRe } from './config';
 import { LBM3D } from './sim/lbm3d';
 import { DyeField3D } from './sim/dye3d';
 import { VolumeRenderer } from './render/volume3d';
+import { ParticleSystem } from './render/particles3d';
 import type { ShapeId } from './sim/voxelize';
 import { voxelizeMesh } from './obstacles/upload';
 import { showToast } from './ui/toast';
@@ -37,6 +38,7 @@ export class App {
   private lbm: LBM3D | null = null;
   private dye: DyeField3D | null = null;
   private volumeRenderer: VolumeRenderer | null = null;
+  private particles: ParticleSystem | null = null;
   private simStepCount = 0;
   private rafId = 0;
   private running = false;
@@ -129,6 +131,10 @@ export class App {
       const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
       this.volumeRenderer = new VolumeRenderer(device, canvasFormat, () => ctx.getCurrentTexture().createView());
       this.volumeRenderer.setTextures(this.lbm.macrosTextureView, this.dye.currentView);
+
+      // GPU particle system: 200k tracer particles for sharp wind-tunnel streamlines.
+      this.particles = new ParticleSystem(device, canvasFormat, () => ctx.getCurrentTexture().createView());
+      this.particles.setMacrosTexture(this.lbm.macrosTextureView);
     }
 
     this.wireUI();
@@ -649,8 +655,10 @@ export class App {
       return;
     }
 
-    // Volumetric overlay — runs after Three.js so it composites on top.
-    if (this.volumeRenderer && this.lbm) {
+    // GPU particle streamlines — sharp tracer dots advected by the LBM
+    // velocity field. Runs after Three.js so particles composite over the
+    // scene with additive blending.
+    if (this.particles && this.lbm) {
       this.camera.updateMatrixWorld();
       const view = this.camera.matrixWorldInverse;
       const proj = this.camera.projectionMatrix;
@@ -658,11 +666,8 @@ export class App {
       const { sx, sy, sz } = this.latticeWorld();
       const aabbMin = new THREE.Vector3(-sx * 0.5, -sy * 0.5, -sz * 0.5);
       const aabbMax = new THREE.Vector3(sx * 0.5, sy * 0.5, sz * 0.5);
-      // Update dye view each frame in case ping-pong swapped
-      if (this.dye) {
-        this.volumeRenderer.setTextures(this.lbm.macrosTextureView, this.dye.currentView);
-      }
-      this.volumeRenderer.render(view, proj, camPos, aabbMin, aabbMax, 32);
+      const { W, H, D } = latticeDims(this.config.N);
+      this.particles.step(view, proj, camPos, aabbMin, aabbMax, { W, H, D });
     }
 
     const now = performance.now();

@@ -29,16 +29,16 @@ export interface SimConfig {
 
 export function defaultConfig(): SimConfig {
   return {
-    N: 80,
-    uIn: 0.08,
-    visc: 0.005,
+    N: 80,            // proven stable at this resolution
+    uIn: 0.11,        // faster wind so flow develops within 2–3 seconds
+    visc: 0.0045,     // moderate viscosity for stable BGK with vivid wake
     aoaDeg: 0,
     gravity: [0, 0, 0],
-    useMRT: false,
+    useMRT: false,    // BGK is the safe default; turning on TRT/LES exposes WGSL bugs
     useLES: false,
     freeSlip: false,
     shapeId: 'sphere',
-    dyeAmount: 0.7,
+    dyeAmount: 1.0,
     paused: false,
     simSpeed: 1.0,
   };
