@@ -11,6 +11,7 @@ import { VolumeRenderer } from './render/volume3d';
 import type { ShapeId } from './sim/voxelize';
 import { voxelizeMesh } from './obstacles/upload';
 import { showToast } from './ui/toast';
+import INJECT_WGSL from './sim/inject.wgsl?raw';
 
 /**
  * Top-level orchestrator (3D).
@@ -679,18 +680,110 @@ export class App {
 
   private subAccum = 0;
 
-  /** Placeholder for Track C canvas click-inject wiring. */
-  private wireInject() {
-    // Track C will implement canvas mousedown/mousemove handlers here.
+  private buildInjectPipeline(device: GPUDevice) {
+    this._injectBindGroupLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      ],
+    });
+    const module = device.createShaderModule({ code: INJECT_WGSL, label: 'inject.wgsl' });
+    this._injectPipeline = device.createComputePipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this._injectBindGroupLayout] }),
+      compute: { module, entryPoint: 'cs_inject' },
+    });
+    // 48 bytes: vec3f center(12) + f32 radius(4) + vec3f impulse(12) + u32 type_(4) + vec3u dims(12) + u32 pad(4)
+    this._injectParamsBuf = device.createBuffer({
+      size: 48,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
   }
 
-  /** Placeholder for Track C inject pipeline setup. Fields kept here to avoid TS errors. */
-  private buildInjectPipeline(_device: GPUDevice) {
-    void this._gpuDevice;
-    void this._injectActive;
-    void this._injectMode;
-    void this._injectPipeline;
-    void this._injectParamsBuf;
-    void this._injectBindGroupLayout;
+  private dispatchInject(cx: number, cy: number, cz: number) {
+    if (!this.lbm || !this._injectPipeline || !this._injectParamsBuf || !this._injectBindGroupLayout) return;
+    const device = this._gpuDevice;
+    if (!device) return;
+
+    const radius = Math.max(3, Math.round(this.lbm.H * 0.06));
+    const strength = 0.04;
+    const typeVal = this._injectMode === 'impulse' ? 1 : 0;
+
+    const rawBuf = new ArrayBuffer(48);
+    const f32 = new Float32Array(rawBuf);
+    const u32 = new Uint32Array(rawBuf);
+    f32[0] = cx; f32[1] = cy; f32[2] = cz;
+    f32[3] = radius;
+    f32[4] = strength; f32[5] = 0; f32[6] = 0;
+    u32[7] = typeVal;
+    u32[8] = this.lbm.W; u32[9] = this.lbm.H; u32[10] = this.lbm.D;
+    u32[11] = 0;
+    device.queue.writeBuffer(this._injectParamsBuf, 0, rawBuf);
+
+    const fBuf = this.lbm.currentFBuffer;
+    const bg = device.createBindGroup({
+      layout: this._injectBindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: this._injectParamsBuf } },
+        { binding: 1, resource: { buffer: fBuf } },
+      ],
+    });
+
+    const enc = device.createCommandEncoder({ label: 'inject' });
+    const pass = enc.beginComputePass();
+    pass.setPipeline(this._injectPipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(
+      Math.ceil(this.lbm.W / 4),
+      Math.ceil(this.lbm.H / 4),
+      Math.ceil(this.lbm.D / 4),
+    );
+    pass.end();
+    device.queue.submit([enc.finish()]);
+  }
+
+  private wireInject() {
+    const canvas = this.canvas;
+    let pointerDown = false;
+
+    const canvasToLattice = (clientX: number, clientY: number): [number, number, number] | null => {
+      if (!this.lbm) return null;
+      const rect = canvas.getBoundingClientRect();
+      const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+      const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
+
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
+
+      const { sx, sy, sz } = this.latticeWorld();
+      const box = new THREE.Box3(
+        new THREE.Vector3(-sx * 0.5, -sy * 0.5, -sz * 0.5),
+        new THREE.Vector3(sx * 0.5, sy * 0.5, sz * 0.5),
+      );
+      const target = new THREE.Vector3();
+      if (!raycaster.ray.intersectBox(box, target)) return null;
+
+      const ix = Math.round(((target.x + sx * 0.5) / sx) * (this.lbm.W - 1));
+      const iy = Math.round(((target.y + sy * 0.5) / sy) * (this.lbm.H - 1));
+      const iz = Math.round(((target.z + sz * 0.5) / sz) * (this.lbm.D - 1));
+      return [
+        Math.max(0, Math.min(this.lbm.W - 1, ix)),
+        Math.max(0, Math.min(this.lbm.H - 1, iy)),
+        Math.max(0, Math.min(this.lbm.D - 1, iz)),
+      ];
+    };
+
+    canvas.addEventListener('pointerdown', (e) => {
+      if (!this._injectActive) return;
+      pointerDown = true;
+      const lc = canvasToLattice(e.clientX, e.clientY);
+      if (lc) this.dispatchInject(...lc);
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (!this._injectActive || !pointerDown) return;
+      const lc = canvasToLattice(e.clientX, e.clientY);
+      if (lc) this.dispatchInject(...lc);
+    });
+    canvas.addEventListener('pointerup', () => { pointerDown = false; });
+    canvas.addEventListener('pointerleave', () => { pointerDown = false; });
   }
 }
