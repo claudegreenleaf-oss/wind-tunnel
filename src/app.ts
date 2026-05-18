@@ -1,125 +1,160 @@
 import * as THREE from 'three';
-import { defaultConfig, computeRe } from './config';
-import { LBMSolver } from './sim/lbm/solver';
-import { DyeField } from './sim/dye/dye';
-import { CompositeRenderer } from './render/composite';
-import { ForceComputer } from './sim/forces/forces';
-import { ObstacleManager } from './obstacles';
-import { ControlPanel } from './ui/panel';
-import { HUD } from './ui/hud';
-import { FreeDrawController } from './obstacles/freeDraw';
+import { WebGPURenderer, MeshStandardNodeMaterial, LineBasicNodeMaterial, MeshBasicNodeMaterial } from 'three/webgpu';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { defaultConfig, latticeDims } from './config';
 
 /**
- * Top-level orchestrator. Owns the renderer, solver, dye field, obstacle manager,
- * force computer, composite renderer, and UI. Runs the requestAnimationFrame loop.
+ * Top-level orchestrator (3D).
+ *
+ * Phase 0 milestone: WebGPU renderer wired up, scene with a wireframe lattice
+ * volume + an obstacle mesh (sphere) + orbit camera + adequate lighting.
+ *
+ * Subsequent phases will plug in the D3Q19 LBM compute pipeline, 3D dye field,
+ * volumetric raymarcher, etc.
  */
 export class App {
-  private readonly renderer: THREE.WebGLRenderer;
-  private readonly config = defaultConfig();
-  private readonly lbm: LBMSolver;
-  private readonly dye: DyeField;
-  private readonly forces: ForceComputer;
-  private readonly composite: CompositeRenderer;
-  private readonly obstacles: ObstacleManager;
-  // panel and drawCtrl are constructed for their side effects (event listeners);
-  // we don't read them after construction.
-  private readonly hud: HUD;
-
-  private running = false;
-  private rafId = 0;
-  private frame = 0;
-  private latestRe = 0;
-
-  // C_d/C_l smoothing (EMA)
-  private cdEma = 0;
-  private clEma = 0;
-
   private readonly canvas: HTMLCanvasElement;
+  private readonly config = defaultConfig();
 
-  constructor(canvas: HTMLCanvasElement) {
+  private renderer!: WebGPURenderer;
+  private scene!: THREE.Scene;
+  private camera!: THREE.PerspectiveCamera;
+  private controls!: OrbitControls;
+
+  private latticeGroup!: THREE.Group;
+  private obstacleMesh: THREE.Mesh | null = null;
+
+  private rafId = 0;
+  private running = false;
+
+  // Adapter is accepted (and ignored for now) so the constructor signature is
+  // ready for Phase 1, where we'll attach the LBM compute pipeline directly to it.
+  constructor(canvas: HTMLCanvasElement, _adapter: GPUAdapter) {
     this.canvas = canvas;
-    this.renderer = new THREE.WebGLRenderer({
-      canvas,
-      antialias: false,
-      preserveDrawingBuffer: false,
-      powerPreference: 'high-performance',
-    });
-    this.renderer.setPixelRatio(1); // we render at lattice resolution then upscale via canvas
-    this.renderer.autoClear = false;
-
-    const { width, height } = this.config;
-
-    // Initial obstacle: a cylinder at 1/3 of the way along x, centered vertically.
-    this.obstacles = new ObstacleManager(width, height, {
-      kind: 'preset',
-      presetId: 'cylinder',
-      cx: Math.round(width * 0.3),
-      cy: Math.round(height * 0.5),
-      scale: Math.round(Math.min(width, height) * 0.1),  // ~10% of min dim
-      rot: 0,
-    });
-
-    this.lbm = new LBMSolver(this.renderer, width, height, this.obstacles.texture);
-    this.lbm.uIn = this.config.uIn;
-    this.lbm.visc = this.config.visc;
-    this.lbm.aoaRad = (this.config.aoaDeg * Math.PI) / 180;
-
-    this.dye = new DyeField(this.renderer, width, height, this.obstacles.texture);
-    this.dye.amount = this.config.dyeAmount;
-
-    this.forces = new ForceComputer(this.renderer, width, height);
-    this.composite = new CompositeRenderer(width, height);
-    this.composite.mode = this.config.vizMode;
-    this.composite.speedScale = 1 / Math.max(this.config.uIn, 1e-3);
-
-    this.hud = new HUD();
-
-    const overlay = document.getElementById('draw-overlay')! as HTMLElement;
-    const drawCtrl = new FreeDrawController(overlay, this.canvas, {
-      onPoint: () => { /* live preview omitted for simplicity */ },
-      onCommit: (poly) => {
-        // Flip y from DOM (top-down) to lattice (bottom-up) and feed as normalized.
-        const flipped: Array<[number, number]> = poly.map(([nx, ny]) => [nx, 1 - ny]);
-        this.obstacles.setPolygon(flipped);
-        this.config.shapeId = 'custom';
-        this.lbm.reset(this.renderer);
-        this.dye.reset(this.renderer);
-      },
-      onCancel: () => { /* nothing */ },
-    });
-
-    new ControlPanel(this.config, {
-      onShape: (id) => {
-        if (id === 'custom') return;
-        this.obstacles.setPreset(id);
-        this.config.shapeId = id;
-        this.lbm.reset(this.renderer);
-        this.dye.reset(this.renderer);
-      },
-      onDraw: () => drawCtrl.enable(),
-      onReset: () => {
-        this.lbm.reset(this.renderer);
-        this.dye.reset(this.renderer);
-      },
-      onSpeed: (v) => {
-        this.lbm.uIn = v;
-        this.composite.speedScale = 1 / Math.max(v, 1e-3);
-      },
-      onVisc: (v) => { this.lbm.visc = v; },
-      onAoa: (deg) => {
-        this.obstacles.setRotation(-(deg * Math.PI) / 180);
-      },
-      onDye: (v) => { this.dye.amount = v; },
-      onMode: (m) => { this.composite.mode = m; },
-    });
-
-    this.handleResize();
-    window.addEventListener('resize', () => this.handleResize());
   }
 
-  start() {
+  async start() {
+    this.renderer = new WebGPURenderer({
+      canvas: this.canvas,
+      antialias: true,
+      powerPreference: 'high-performance',
+    });
+    await this.renderer.init();
+    this.renderer.setClearColor(0x07070b, 1);
+    this.handleResize();
+
+    this.scene = new THREE.Scene();
+    this.scene.fog = new THREE.FogExp2(0x07070b, 0.04);
+
+    this.camera = new THREE.PerspectiveCamera(45, this.canvas.clientWidth / this.canvas.clientHeight, 0.1, 200);
+    this.camera.position.set(8, 4, 8);
+
+    this.controls = new OrbitControls(this.camera, this.canvas);
+    this.controls.enableDamping = true;
+    this.controls.dampingFactor = 0.08;
+    this.controls.target.set(0, 0, 0);
+
+    // Lighting: key + rim, plus a soft ambient.
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.15));
+    const key = new THREE.DirectionalLight(0xfff4e0, 0.7);
+    key.position.set(5, 7, 4);
+    this.scene.add(key);
+    const rim = new THREE.DirectionalLight(0x6bf0d6, 0.4);
+    rim.position.set(-6, 2, -4);
+    this.scene.add(rim);
+
+    // Lattice AABB visualization: a hairline cube showing the simulation volume.
+    this.latticeGroup = new THREE.Group();
+    this.scene.add(this.latticeGroup);
+    this.rebuildLatticeBox();
+
+    // Obstacle placeholder: a sphere at 1/3 of the way along the tunnel.
+    this.rebuildObstacle();
+
+    // Subtle floor for spatial reference.
+    const grid = new THREE.GridHelper(20, 20, 0x1f1f2c, 0x14141d);
+    grid.position.y = -this.latticeWorld().sy * 0.5 - 0.01;
+    this.scene.add(grid);
+
+    window.addEventListener('resize', () => this.handleResize());
     this.running = true;
-    this.loop(performance.now());
+    this.loop();
+  }
+
+  private latticeWorld() {
+    // Map lattice cells to world units. We pick W=10 wide (in world space).
+    const { W, H, D } = latticeDims(this.config.N);
+    const worldWidth = 10;
+    const cell = worldWidth / W;
+    return { sx: W * cell, sy: H * cell, sz: D * cell, cell };
+  }
+
+  private rebuildLatticeBox() {
+    while (this.latticeGroup.children.length) {
+      const c = this.latticeGroup.children.pop()!;
+      (c as THREE.Mesh).geometry?.dispose?.();
+      ((c as THREE.Mesh).material as THREE.Material | undefined)?.dispose?.();
+    }
+    const { sx, sy, sz } = this.latticeWorld();
+    const box = new THREE.BoxGeometry(sx, sy, sz);
+    const edges = new THREE.EdgesGeometry(box);
+    const lineMat = new LineBasicNodeMaterial({ transparent: true, opacity: 0.45 });
+    lineMat.color = new THREE.Color(0x6bf0d6);
+    const line = new THREE.LineSegments(edges, lineMat);
+    this.latticeGroup.add(line);
+    box.dispose();
+
+    // Inlet indicator: a faint plane on the -X face.
+    const inletGeom = new THREE.PlaneGeometry(sz, sy);
+    const inletMat = new MeshBasicNodeMaterial({ transparent: true, opacity: 0.06, side: THREE.DoubleSide });
+    inletMat.color = new THREE.Color(0xff7ad9);
+    const inlet = new THREE.Mesh(inletGeom, inletMat);
+    inlet.position.set(-sx * 0.5, 0, 0);
+    inlet.rotation.y = Math.PI * 0.5;
+    this.latticeGroup.add(inlet);
+  }
+
+  private rebuildObstacle() {
+    if (this.obstacleMesh) {
+      this.scene.remove(this.obstacleMesh);
+      this.obstacleMesh.geometry.dispose();
+      (this.obstacleMesh.material as THREE.Material).dispose();
+      this.obstacleMesh = null;
+    }
+    const { sx, sy } = this.latticeWorld();
+    // Place obstacle 30% of the way along the tunnel (from the inlet).
+    const x = -sx * 0.5 + sx * 0.3;
+    const r = sy * 0.18;
+    let geom: THREE.BufferGeometry;
+    switch (this.config.shapeId) {
+      case 'cylinder':
+        geom = new THREE.CylinderGeometry(r, r, sy * 0.85, 48);
+        break;
+      case 'sphere':
+      default:
+        geom = new THREE.SphereGeometry(r, 48, 32);
+        break;
+    }
+    const mat = new MeshStandardNodeMaterial({
+      color: 0xe7e9f0,
+      roughness: 0.32,
+      metalness: 0.04,
+      emissive: 0x14141d,
+    });
+    this.obstacleMesh = new THREE.Mesh(geom, mat);
+    this.obstacleMesh.position.set(x, 0, 0);
+    this.scene.add(this.obstacleMesh);
+  }
+
+  setShape(id: string) {
+    this.config.shapeId = id;
+    this.rebuildObstacle();
+  }
+
+  setResolution(N: number) {
+    this.config.N = Math.max(16, Math.min(256, Math.round(N)));
+    this.rebuildLatticeBox();
+    this.rebuildObstacle();
   }
 
   stop() {
@@ -128,62 +163,24 @@ export class App {
   }
 
   private handleResize() {
-    const cssW = this.canvas.clientWidth;
-    const cssH = this.canvas.clientHeight;
-    // Use the lattice resolution as the drawing buffer — canvas CSS handles upscale.
-    this.renderer.setSize(this.config.width, this.config.height, false);
-    this.canvas.style.width = `${cssW}px`;
-    this.canvas.style.height = `${cssH}px`;
+    const w = this.canvas.clientWidth;
+    const h = this.canvas.clientHeight;
+    this.renderer?.setSize(w, h, false);
+    if (this.camera) {
+      this.camera.aspect = w / Math.max(1, h);
+      this.camera.updateProjectionMatrix();
+    }
   }
 
-  private loop = (nowMs: number) => {
+  private loop = () => {
     if (!this.running) return;
     this.rafId = requestAnimationFrame(this.loop);
-    this.tick(nowMs);
-  };
-
-  private tick(nowMs: number) {
-    if (!this.config.paused) {
-      // Multiple LBM substeps per render frame for smoother flow at lower resolutions.
-      const substeps = 2;
-      for (let s = 0; s < substeps; s++) {
-        this.lbm.step(this.renderer);
-        this.dye.step(this.renderer, this.lbm.macroTexture, this.obstacles.texture);
-      }
-      this.frame += substeps;
-
-      // Force readback every 4 frames (amortize cost).
-      if (this.frame % 4 === 0) {
-        const { Fx, Fy } = this.forces.compute(
-          this.renderer,
-          this.lbm.fTextureA,
-          this.lbm.fTextureB,
-          this.lbm.fTextureC,
-          this.obstacles.texture,
-        );
-        // Convert to dimensionless coefficients.
-        // C_d = 2 * F / (rho * U^2 * L), with rho = 1, L = obstacle projected width.
-        const L = this.obstacles.charLengthCells;
-        const denom = Math.max(this.lbm.uIn * this.lbm.uIn * L, 1e-6);
-        const cd = (2 * Fx) / denom;
-        const cl = (2 * Fy) / denom;
-        const a = 0.25;
-        this.cdEma = (1 - a) * this.cdEma + a * cd;
-        this.clEma = (1 - a) * this.clEma + a * cl;
-        this.latestRe = computeRe(this.lbm.uIn, this.lbm.visc, L);
-        this.hud.pushForce(this.cdEma, this.clEma, this.latestRe);
-      }
+    this.controls.update();
+    try {
+      this.renderer.render(this.scene, this.camera);
+    } catch (err) {
+      console.error('render error', err);
+      this.running = false;
     }
-
-    // Composite to default framebuffer (canvas).
-    this.composite.render(
-      this.renderer,
-      null,
-      this.lbm.macroTexture,
-      this.dye.texture,
-      this.obstacles.texture,
-    );
-
-    this.hud.tickFps(nowMs);
-  }
+  };
 }

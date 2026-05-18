@@ -1,42 +1,49 @@
-// Simulation configuration. Grid resolution is adaptive based on device.
+/**
+ * 3D wind tunnel configuration. Lattice is anisotropic:
+ *   W (length along flow) = 2 * N
+ *   H (height)            = N
+ *   D (depth)             = N
+ * where N is the user-controlled resolution slider value.
+ */
 
 export interface SimConfig {
-  width: number;       // lattice cells in x
-  height: number;      // lattice cells in y
-  uIn: number;         // inlet velocity (lattice units, max ~0.15 for stability)
-  visc: number;        // kinematic viscosity (lattice units)
-  aoaDeg: number;      // angle of attack, degrees
-  dyeAmount: number;   // 0..1
-  vizMode: number;     // 0=speed, 1=vorticity, 2=pressure, 3=dye-only
-  shapeId: string;     // preset id or "custom"
+  // Resolution
+  N: number;          // base resolution; W=2N, H=N, D=N
+  // Flow
+  uIn: number;        // inlet velocity (lattice units)
+  visc: number;       // kinematic viscosity (lattice units)
+  aoaDeg: number;     // angle of attack
+  // Physics
+  gravity: [number, number, number];   // body force per cell (lattice units / step^2)
+  // Shape
+  shapeId: string;
+  // Visualization
+  dyeAmount: number;
+  // Time
   paused: boolean;
+  simSpeed: number;   // 0.1x – 4x
 }
 
-export function adaptiveGridSize(): { width: number; height: number } {
-  const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
-  const lowMem = (navigator as Navigator & { deviceMemory?: number }).deviceMemory != null
-    && (navigator as Navigator & { deviceMemory?: number }).deviceMemory! < 4;
-  if (isMobile || lowMem) return { width: 256, height: 128 };
-  return { width: 384, height: 192 };
-}
-
-export const defaultConfig = (): SimConfig => {
-  const { width, height } = adaptiveGridSize();
+export function defaultConfig(): SimConfig {
   return {
-    width,
-    height,
-    uIn: 0.1,
+    N: 80,            // ~80*40*40 ~= 130k cells: safe default for first render
+    uIn: 0.08,
     visc: 0.005,
     aoaDeg: 0,
+    gravity: [0, 0, 0],
+    shapeId: 'sphere',
     dyeAmount: 0.7,
-    vizMode: 1, // vorticity by default — it's the showstopper
-    shapeId: 'cylinder',
     paused: false,
+    simSpeed: 1.0,
   };
-};
+}
 
-// Reynolds number = U * L / nu, where L = obstacle characteristic length.
-// We use grid units: L = ~40 cells (typical obstacle), so Re = U * 40 / visc.
-export function computeRe(uIn: number, visc: number, L: number = 40): number {
+export function latticeDims(N: number): { W: number; H: number; D: number } {
+  return { W: 2 * N, H: N, D: N };
+}
+
+/** Reynolds number: U * L / nu. L = N / 4 (typical obstacle size). */
+export function computeRe(uIn: number, visc: number, N: number): number {
+  const L = Math.max(1, Math.round(N / 4));
   return (uIn * L) / Math.max(visc, 1e-6);
 }
