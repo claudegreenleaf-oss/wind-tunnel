@@ -1,9 +1,16 @@
 import * as THREE from 'three';
 import { WebGPURenderer, MeshStandardNodeMaterial, LineBasicNodeMaterial, MeshBasicNodeMaterial } from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { TeapotGeometry } from 'three/addons/geometries/TeapotGeometry.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { defaultConfig, latticeDims, computeRe } from './config';
 import { LBM3D } from './sim/lbm3d';
+import { DyeField3D } from './sim/dye3d';
+import { VolumeRenderer } from './render/volume3d';
 import type { ShapeId } from './sim/voxelize';
+import { voxelizeMesh } from './obstacles/upload';
+import { showToast } from './ui/toast';
 
 /**
  * Top-level orchestrator (3D).
@@ -24,9 +31,11 @@ export class App {
   private controls!: OrbitControls;
 
   private latticeGroup!: THREE.Group;
-  private obstacleMesh: THREE.Mesh | null = null;
+  private obstacleMesh: THREE.Mesh | THREE.Group | null = null;
 
   private lbm: LBM3D | null = null;
+  private dye: DyeField3D | null = null;
+  private volumeRenderer: VolumeRenderer | null = null;
   private simStepCount = 0;
   private rafId = 0;
   private running = false;
@@ -34,6 +43,16 @@ export class App {
   // fps smoothing
   private lastFpsUpdate = 0;
   private frameCount = 0;
+
+  // GPU device (set in start(), used by inject pipeline)
+  private _gpuDevice: GPUDevice | null = null;
+
+  // Inject mode state (wired in Track C)
+  private _injectActive = false;
+  private _injectMode: 'impulse' | 'dye' = 'impulse';
+  private _injectPipeline: GPUComputePipeline | null = null;
+  private _injectParamsBuf: GPUBuffer | null = null;
+  private _injectBindGroupLayout: GPUBindGroupLayout | null = null;
 
   // Adapter is accepted (and ignored for now) so the constructor signature is
   // ready for Phase 1, where we'll attach the LBM compute pipeline directly to it.
@@ -89,6 +108,7 @@ export class App {
     if (!device) {
       console.error('WebGPU device not available on renderer.backend.device');
     } else {
+      this._gpuDevice = device;
       const { W, H, D } = latticeDims(this.config.N);
       this.lbm = new LBM3D(device, W, H, D);
       this.lbm.uIn = this.config.uIn;
@@ -96,9 +116,22 @@ export class App {
       this.lbm.aoaRad = (this.config.aoaDeg * Math.PI) / 180;
       this.lbm.gravity = this.config.gravity;
       this.lbm.setShape(this.config.shapeId as ShapeId);
+
+      // Phase 3: 3D dye field
+      this.dye = new DyeField3D(device, W, H, D, () => this.lbm!.macrosTextureView);
+
+      // Inject pipeline
+      this.buildInjectPipeline(device);
+
+      // Phase 2: volumetric raymarcher overlaid on Three.js canvas
+      const ctx = this.canvas.getContext('webgpu') as GPUCanvasContext;
+      const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+      this.volumeRenderer = new VolumeRenderer(device, canvasFormat, () => ctx.getCurrentTexture().createView());
+      this.volumeRenderer.setTextures(this.lbm.macrosTextureView, this.dye.currentView);
     }
 
     this.wireUI();
+    this.wireDragDrop();
 
     window.addEventListener('resize', () => this.handleResize());
     this.running = true;
@@ -273,36 +306,213 @@ export class App {
     this.latticeGroup.add(inlet);
   }
 
-  private rebuildObstacle() {
-    if (this.obstacleMesh) {
-      this.scene.remove(this.obstacleMesh);
-      this.obstacleMesh.geometry.dispose();
-      (this.obstacleMesh.material as THREE.Material).dispose();
-      this.obstacleMesh = null;
+  private disposeMeshOrGroup(obj: THREE.Mesh | THREE.Group) {
+    if (obj instanceof THREE.Group) {
+      obj.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.geometry?.dispose();
+          (child.material as THREE.Material)?.dispose();
+        }
+      });
+    } else {
+      obj.geometry?.dispose();
+      (obj.material as THREE.Material)?.dispose();
     }
-    const { sx, sy } = this.latticeWorld();
-    // Place obstacle 30% of the way along the tunnel (from the inlet).
-    const x = -sx * 0.5 + sx * 0.3;
-    const r = sy * 0.18;
-    let geom: THREE.BufferGeometry;
-    switch (this.config.shapeId) {
-      case 'cylinder':
-        geom = new THREE.CylinderGeometry(r, r, sy * 0.85, 48);
-        break;
-      case 'sphere':
-      default:
-        geom = new THREE.SphereGeometry(r, 48, 32);
-        break;
-    }
-    const mat = new MeshStandardNodeMaterial({
+  }
+
+  private makeMat() {
+    return new MeshStandardNodeMaterial({
       color: 0xe7e9f0,
       roughness: 0.32,
       metalness: 0.04,
       emissive: 0x14141d,
     });
-    this.obstacleMesh = new THREE.Mesh(geom, mat);
+  }
+
+  private rebuildObstacle() {
+    if (this.obstacleMesh) {
+      this.scene.remove(this.obstacleMesh);
+      this.disposeMeshOrGroup(this.obstacleMesh);
+      this.obstacleMesh = null;
+    }
+    const { sx, sy } = this.latticeWorld();
+    const x = -sx * 0.5 + sx * 0.3;
+    const r = sy * 0.18;
+    const halfLen = sy * 0.42;
+
+    switch (this.config.shapeId) {
+      case 'cylinder': {
+        const geom = new THREE.CylinderGeometry(r, r, sy * 0.85, 48);
+        this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
+        break;
+      }
+      case 'cone': {
+        const geom = new THREE.ConeGeometry(r, 2 * halfLen, 32);
+        const mesh = new THREE.Mesh(geom, this.makeMat());
+        mesh.rotation.z = -Math.PI / 2;
+        this.obstacleMesh = mesh;
+        break;
+      }
+      case 'wing': {
+        const shape = new THREE.Shape();
+        const pts = 32;
+        const topPts: THREE.Vector2[] = [];
+        const botPts: THREE.Vector2[] = [];
+        for (let i = 0; i <= pts; i++) {
+          const xc = i / pts;
+          const sq = Math.sqrt(Math.max(0, xc));
+          const yt = 5 * 0.12 * (0.2969 * sq - 0.126 * xc - 0.3516 * xc * xc + 0.2843 * xc * xc * xc - 0.1015 * xc * xc * xc * xc);
+          const px = (xc - 0.5) * 2 * halfLen;
+          const py = yt * halfLen * 0.5;
+          topPts.push(new THREE.Vector2(px, py));
+          botPts.push(new THREE.Vector2(px, -py));
+        }
+        shape.moveTo(topPts[0].x, topPts[0].y);
+        for (let i = 1; i < topPts.length; i++) shape.lineTo(topPts[i].x, topPts[i].y);
+        for (let i = botPts.length - 1; i >= 0; i--) shape.lineTo(botPts[i].x, botPts[i].y);
+        shape.closePath();
+        const extrudeSettings = { depth: halfLen * 3, bevelEnabled: false };
+        const geom = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+        geom.translate(0, 0, -halfLen * 1.5);
+        const mesh = new THREE.Mesh(geom, this.makeMat());
+        this.obstacleMesh = mesh;
+        break;
+      }
+      case 'teapot': {
+        const geom = new TeapotGeometry(r, 12);
+        this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
+        break;
+      }
+      case 'f1car': {
+        const group = new THREE.Group();
+        // Main hull: scaled sphere
+        const hullGeom = new THREE.SphereGeometry(r, 32, 16);
+        const hull = new THREE.Mesh(hullGeom, this.makeMat());
+        hull.scale.set(1.0, 0.4, 0.7);
+        group.add(hull);
+        // 4 wheels
+        const wr = r * 0.2;
+        const wh = r * 0.15;
+        const wx = r * 0.6;
+        const wz = r * 0.6;
+        const wheelPositions: [number, number, number][] = [
+          [wx, 0, wz], [wx, 0, -wz], [-wx, 0, wz], [-wx, 0, -wz],
+        ];
+        for (const [wPx, wPy, wPz] of wheelPositions) {
+          const wGeom = new THREE.CylinderGeometry(wr, wr, wh * 2, 16);
+          const wheel = new THREE.Mesh(wGeom, this.makeMat());
+          wheel.position.set(wPx, wPy, wPz);
+          group.add(wheel);
+        }
+        this.obstacleMesh = group;
+        break;
+      }
+      case 'helmet': {
+        const geom = new THREE.SphereGeometry(r, 48, 32);
+        this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
+        break;
+      }
+      case 'sphere':
+      default: {
+        const geom = new THREE.SphereGeometry(r, 48, 32);
+        this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
+        break;
+      }
+    }
+
     this.obstacleMesh.position.set(x, 0, 0);
     this.scene.add(this.obstacleMesh);
+  }
+
+  private wireDragDrop() {
+    const overlay = document.getElementById('drop-overlay')!;
+
+    this.canvas.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      overlay.hidden = false;
+    });
+
+    this.canvas.addEventListener('dragleave', () => {
+      overlay.hidden = true;
+    });
+
+    this.canvas.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      overlay.hidden = true;
+      const file = e.dataTransfer?.files[0];
+      if (!file) return;
+
+      const ext = file.name.split('.').pop()?.toLowerCase();
+      if (ext !== 'glb' && ext !== 'obj') {
+        showToast('Only .glb and .obj files are supported');
+        return;
+      }
+
+      showToast('Loading mesh…');
+
+      try {
+        let geometry: THREE.BufferGeometry | null = null;
+
+        if (ext === 'glb') {
+          const loader = new GLTFLoader();
+          const buf = await file.arrayBuffer();
+          const gltf = await new Promise<any>((resolve, reject) => {
+            loader.parse(buf, '', resolve, reject);
+          });
+          gltf.scene.traverse((child: THREE.Object3D) => {
+            if (!geometry && child instanceof THREE.Mesh) {
+              geometry = child.geometry.clone();
+            }
+          });
+        } else {
+          const loader = new OBJLoader();
+          const text = await file.text();
+          const obj = loader.parse(text);
+          obj.traverse((child: THREE.Object3D) => {
+            if (!geometry && child instanceof THREE.Mesh) {
+              geometry = child.geometry.clone();
+            }
+          });
+        }
+
+        if (!geometry) {
+          showToast('No mesh found in file');
+          return;
+        }
+
+        showToast('Voxelizing…');
+
+        if (!this.lbm) return;
+        const { W, H, D } = { W: this.lbm.W, H: this.lbm.H, D: this.lbm.D };
+        const mask = await voxelizeMesh(geometry, W, H, D);
+        this.lbm.setMaskBuffer(mask);
+
+        // Show a custom mesh as the obstacle
+        if (this.obstacleMesh) {
+          this.scene.remove(this.obstacleMesh);
+          this.disposeMeshOrGroup(this.obstacleMesh);
+          this.obstacleMesh = null;
+        }
+        const { sx } = this.latticeWorld();
+        const uploadMesh = new THREE.Mesh(geometry, this.makeMat());
+        uploadMesh.position.set(-sx * 0.5 + sx * 0.3, 0, 0);
+        this.obstacleMesh = uploadMesh;
+        this.scene.add(this.obstacleMesh);
+
+        // Mark the custom option as active in the select
+        const sel = document.getElementById('shape-select') as HTMLSelectElement;
+        const customOpt = sel.querySelector('option[value="custom"]') as HTMLOptionElement | null;
+        if (customOpt) {
+          customOpt.disabled = false;
+          sel.value = 'custom';
+        }
+
+        showToast('Upload complete');
+      } catch (err) {
+        console.error('Upload failed', err);
+        showToast('Upload failed — see console');
+      }
+    });
   }
 
   setShape(id: string) {
@@ -347,6 +557,7 @@ export class App {
       if (steps > 6) steps = 6;
       for (let s = 0; s < steps; s++) {
         this.lbm.step();
+        this.dye?.step();
         this.simStepCount++;
       }
     }
@@ -357,6 +568,22 @@ export class App {
       console.error('render error', err);
       this.running = false;
       return;
+    }
+
+    // Volumetric overlay — runs after Three.js so it composites on top.
+    if (this.volumeRenderer && this.lbm) {
+      this.camera.updateMatrixWorld();
+      const view = this.camera.matrixWorldInverse;
+      const proj = this.camera.projectionMatrix;
+      const camPos = this.camera.position;
+      const { sx, sy, sz } = this.latticeWorld();
+      const aabbMin = new THREE.Vector3(-sx * 0.5, -sy * 0.5, -sz * 0.5);
+      const aabbMax = new THREE.Vector3(sx * 0.5, sy * 0.5, sz * 0.5);
+      // Update dye view each frame in case ping-pong swapped
+      if (this.dye) {
+        this.volumeRenderer.setTextures(this.lbm.macrosTextureView, this.dye.currentView);
+      }
+      this.volumeRenderer.render(view, proj, camPos, aabbMin, aabbMax, 32);
     }
 
     const now = performance.now();
@@ -373,4 +600,14 @@ export class App {
   };
 
   private subAccum = 0;
+
+  /** Placeholder for Track C inject pipeline setup. Fields kept here to avoid TS errors. */
+  private buildInjectPipeline(_device: GPUDevice) {
+    void this._gpuDevice;
+    void this._injectActive;
+    void this._injectMode;
+    void this._injectPipeline;
+    void this._injectParamsBuf;
+    void this._injectBindGroupLayout;
+  }
 }

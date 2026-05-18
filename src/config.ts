@@ -15,6 +15,9 @@ export interface SimConfig {
   aoaDeg: number;     // angle of attack
   // Physics
   gravity: [number, number, number];   // body force per cell (lattice units / step^2)
+  useMRT: boolean;    // true = TRT collision, false = BGK
+  useLES: boolean;    // true = Smagorinsky LES turbulence model
+  freeSlip: boolean;  // true = free-slip walls, false = no-slip (bounce-back)
   // Shape
   shapeId: string;
   // Visualization
@@ -26,11 +29,14 @@ export interface SimConfig {
 
 export function defaultConfig(): SimConfig {
   return {
-    N: 80,            // ~80*40*40 ~= 130k cells: safe default for first render
+    N: 80,
     uIn: 0.08,
     visc: 0.005,
     aoaDeg: 0,
     gravity: [0, 0, 0],
+    useMRT: false,
+    useLES: false,
+    freeSlip: false,
     shapeId: 'sphere',
     dyeAmount: 0.7,
     paused: false,

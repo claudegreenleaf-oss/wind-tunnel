@@ -23,6 +23,9 @@ export class LBM3D {
   visc = 0.005;
   aoaRad = 0;
   gravity: [number, number, number] = [0, 0, 0];
+  useMRT = 0;   // 0 = BGK, 1 = TRT
+  useLES = 0;   // 0 = off, 1 = Smagorinsky LES
+  freeSlip = 0; // 0 = no-slip, 1 = free-slip
 
   // Resources (rebuilt on resize)
   private fA!: GPUBuffer;
@@ -76,7 +79,7 @@ export class LBM3D {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     this.paramsBuf = this.device.createBuffer({
-      size: 48,   // see ParamsLayout below
+      size: 64,   // vec4u dims(16) + f32x4 omega/uIn/aoa/pad(16) + vec4f gravity(16) + u32x4 flags(16)
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -160,6 +163,12 @@ export class LBM3D {
     this.runInit();
   }
 
+  /** Upload a pre-computed mask directly (e.g. from a voxelized uploaded mesh). */
+  setMaskBuffer(mask: Uint32Array) {
+    this.device.queue.writeBuffer(this.maskBuf, 0, mask.buffer, 0, mask.byteLength);
+    this.runInit();
+  }
+
   /** Reallocate everything for a new lattice size. */
   resize(W: number, H: number, D: number) {
     this.dispose();
@@ -191,9 +200,12 @@ export class LBM3D {
   private writeParams() {
     const tau = 3 * this.visc + 0.5;
     const omega = 1 / Math.max(tau, 0.5001);
-    // std140-ish layout for our Params struct:
-    //   vec4u dims (16) | f32 omega | f32 uIn | f32 aoa | f32 pad (16) | vec4f gravity (16) = 48 bytes
-    const buf = new ArrayBuffer(48);
+    // Layout (64 bytes):
+    //   [0..3]  u32: W, H, D, pad       (16 bytes)
+    //   [4..7]  f32: omega, uIn, aoa, pad (16 bytes)
+    //   [8..11] f32: gx, gy, gz, pad    (16 bytes)
+    //   [12..15] u32: useMRT, useLES, freeSlip, pad (16 bytes)
+    const buf = new ArrayBuffer(64);
     const u32 = new Uint32Array(buf);
     const f32 = new Float32Array(buf);
     u32[0] = this.W; u32[1] = this.H; u32[2] = this.D; u32[3] = 0;
@@ -205,6 +217,10 @@ export class LBM3D {
     f32[9] = this.gravity[1];
     f32[10] = this.gravity[2];
     f32[11] = 0;
+    u32[12] = this.useMRT;
+    u32[13] = this.useLES;
+    u32[14] = this.freeSlip;
+    u32[15] = 0;
     this.device.queue.writeBuffer(this.paramsBuf, 0, buf);
   }
 
@@ -241,6 +257,9 @@ export class LBM3D {
   /** The macros texture: rgba16float, channels (u.x, u.y, u.z, rho). */
   get macrosTexture(): GPUTexture { return this.macrosTex; }
   get macrosTextureView(): GPUTextureView { return this.macrosView; }
+
+  /** Current f-buffer (the one holding the latest state). Used by inject shader. */
+  get currentFBuffer(): GPUBuffer { return this.currentIsA ? this.fA : this.fB; }
 
   dispose() {
     this.fA?.destroy();
