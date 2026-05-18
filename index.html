@@ -130,9 +130,13 @@
       </aside>
     </div>
 
-    <div id="drop-overlay" hidden style="position:fixed;inset:0;pointer-events:auto;cursor:copy;backdrop-filter:blur(4px);background:rgba(11,180,120,0.15);display:flex;align-items:center;justify-content:center;z-index:100;font-size:1.4rem;color:#6bf0d6;font-family:sans-serif;letter-spacing:0.05em;">
-      Drop .glb or .obj to voxelize as obstacle
+    <div id="drop-overlay" hidden>
+      <span>Drop .glb or .obj to voxelize as obstacle</span>
     </div>
+    <style>
+      #drop-overlay { position:fixed; inset:0; pointer-events:auto; cursor:copy; backdrop-filter:blur(4px); background:rgba(11,180,120,0.15); display:flex; align-items:center; justify-content:center; z-index:100; font-size:1.4rem; color:#6bf0d6; font-family:sans-serif; letter-spacing:0.05em; }
+      #drop-overlay[hidden] { display:none !important; }
+    </style>
     <script>
       document.querySelectorAll('#panel .group h2').forEach(h2 => {
         h2.addEventListener('click', () => h2.closest('.group').classList.toggle('collapsed'));
