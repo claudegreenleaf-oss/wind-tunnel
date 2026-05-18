@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="description" content="Real-time GPU wind tunnel simulator with Lattice Boltzmann fluid solver. Drop in shapes, watch the flow." />
+    <meta name="theme-color" content="#0a0a0f" />
+    <title>Wind Tunnel · GPU Fluid Simulator</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="view"></canvas>
+
+      <aside id="panel" aria-label="Controls">
+        <header>
+          <h1>Wind Tunnel</h1>
+          <div class="sub">GPU Lattice Boltzmann · D2Q9</div>
+        </header>
+
+        <section class="group">
+          <h2>Shape</h2>
+          <select id="shape-select"></select>
+          <div class="row">
+            <button id="btn-draw" class="btn">Draw custom</button>
+            <button id="btn-reset" class="btn">Reset flow</button>
+          </div>
+        </section>
+
+        <section class="group">
+          <h2>Flow</h2>
+          <label>Wind speed <span class="val" id="val-speed"></span>
+            <input id="sl-speed" type="range" min="0.02" max="0.15" step="0.001" />
+          </label>
+          <label>Viscosity (Re <span id="val-re"></span>) <span class="val" id="val-visc"></span>
+            <input id="sl-visc" type="range" min="0.0006" max="0.05" step="0.0001" />
+          </label>
+          <label>Angle of attack <span class="val" id="val-aoa"></span>
+            <input id="sl-aoa" type="range" min="-30" max="30" step="1" />
+          </label>
+          <label>Dye density <span class="val" id="val-dye"></span>
+            <input id="sl-dye" type="range" min="0" max="1" step="0.01" />
+          </label>
+        </section>
+
+        <section class="group">
+          <h2>Visualization</h2>
+          <div class="radios" id="viz-modes">
+            <button data-mode="0" class="chip">Speed</button>
+            <button data-mode="1" class="chip">Vorticity</button>
+            <button data-mode="2" class="chip">Pressure</button>
+            <button data-mode="3" class="chip">Dye only</button>
+          </div>
+        </section>
+
+        <section class="group hud">
+          <h2>Readout</h2>
+          <div class="readout">
+            <div><span class="lbl">Cd</span><span id="rd-cd">—</span></div>
+            <div><span class="lbl">Cl</span><span id="rd-cl">—</span></div>
+            <div><span class="lbl">Re</span><span id="rd-rey">—</span></div>
+            <div><span class="lbl">fps</span><span id="rd-fps">—</span></div>
+          </div>
+          <div id="cd-chart"></div>
+        </section>
+
+        <footer>
+          <kbd>Space</kbd> pause &nbsp; <kbd>R</kbd> reset &nbsp; <kbd>1-4</kbd> viz
+        </footer>
+      </aside>
+
+      <div id="draw-overlay" hidden>
+        <div class="draw-hint">Click and drag inside the tunnel to sketch a closed shape. Release to apply.</div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
