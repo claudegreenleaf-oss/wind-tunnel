@@ -284,10 +284,61 @@ export class App {
     shapeSelect.value = this.config.shapeId;
     shapeSelect.addEventListener('change', () => {
       this.config.shapeId = shapeSelect.value;
+      // Every new shape starts from neutral orientation/scale so the registry
+      // defaults are visible; the user can then dial in their own transform.
+      this.resetOrientationUI();
       // rebuildObstacle handles both built-in primitives and remote .glb
       // models. For remotes, a placeholder sphere is swapped in until the
       // fetch resolves.
       this.rebuildObstacle();
+    });
+
+    // Orientation + scale sliders. Each one re-applies the obstacle transform
+    // (rotation+scale) and re-voxelizes so the LBM mask stays in sync. We
+    // debounce the voxelize step so dragging the slider is responsive.
+    const scaleSlider = q<HTMLInputElement>('#sl-scale');
+    const scaleVal = q<HTMLSpanElement>('#val-scale');
+    const yawSlider = q<HTMLInputElement>('#sl-yaw');
+    const yawVal = q<HTMLSpanElement>('#val-yaw');
+    const pitchSlider = q<HTMLInputElement>('#sl-pitch');
+    const pitchVal = q<HTMLSpanElement>('#val-pitch');
+    const rollSlider = q<HTMLInputElement>('#sl-roll');
+    const rollVal = q<HTMLSpanElement>('#val-roll');
+
+    scaleSlider.value = String(this.config.scaleMul);
+    yawSlider.value = String(this.config.yawDeg);
+    pitchSlider.value = String(this.config.pitchDeg);
+    rollSlider.value = String(this.config.rollDeg);
+    scaleVal.textContent = this.config.scaleMul.toFixed(2);
+    yawVal.textContent = `${this.config.yawDeg}°`;
+    pitchVal.textContent = `${this.config.pitchDeg}°`;
+    rollVal.textContent = `${this.config.rollDeg}°`;
+
+    const onTransform = () => this.applyObstacleTransform();
+    scaleSlider.addEventListener('input', () => {
+      this.config.scaleMul = parseFloat(scaleSlider.value);
+      scaleVal.textContent = this.config.scaleMul.toFixed(2);
+      onTransform();
+    });
+    yawSlider.addEventListener('input', () => {
+      this.config.yawDeg = parseFloat(yawSlider.value);
+      yawVal.textContent = `${this.config.yawDeg}°`;
+      onTransform();
+    });
+    pitchSlider.addEventListener('input', () => {
+      this.config.pitchDeg = parseFloat(pitchSlider.value);
+      pitchVal.textContent = `${this.config.pitchDeg}°`;
+      onTransform();
+    });
+    rollSlider.addEventListener('input', () => {
+      this.config.rollDeg = parseFloat(rollSlider.value);
+      rollVal.textContent = `${this.config.rollDeg}°`;
+      onTransform();
+    });
+
+    q<HTMLButtonElement>('#btn-reset-orient').addEventListener('click', () => {
+      this.resetOrientationUI();
+      onTransform();
     });
 
     q<HTMLButtonElement>('#btn-reset').addEventListener('click', () => {
@@ -615,6 +666,60 @@ export class App {
     return mat;
   }
 
+  /** Reset orientation/scale sliders + config to neutral. Does not re-voxelize. */
+  private resetOrientationUI() {
+    this.config.yawDeg = 0;
+    this.config.pitchDeg = 0;
+    this.config.rollDeg = 0;
+    this.config.scaleMul = 1;
+    const set = (id: string, val: string, txt: string) => {
+      const sl = document.getElementById(id) as HTMLInputElement | null;
+      const sp = document.getElementById(`val-${id.slice(3)}`) as HTMLSpanElement | null;
+      if (sl) sl.value = val;
+      if (sp) sp.textContent = txt;
+    };
+    set('sl-yaw', '0', '0°');
+    set('sl-pitch', '0', '0°');
+    set('sl-roll', '0', '0°');
+    set('sl-scale', '1', '1.00');
+  }
+
+  /**
+   * Push the current yaw/pitch/roll/scale onto the obstacle mesh and re-voxelize
+   * so the LBM mask follows. We debounce the voxelize step (100ms) so dragging
+   * a slider stays interactive — the mesh visibly rotates every frame, the
+   * physics catches up shortly after.
+   */
+  private orientDebounceId: ReturnType<typeof setTimeout> | null = null;
+  private applyObstacleTransform() {
+    if (!this.obstacleMesh) return;
+    const m = this.obstacleMesh;
+    const deg2rad = (d: number) => (d * Math.PI) / 180;
+    // Three.js applies rotations in order X → Y → Z by default. We want yaw
+    // (Y) around the vertical, pitch (Z) around the side axis, roll (X) along
+    // the flow — so we order the Euler set so the resulting rotation matches
+    // intuition for a wind-tunnel test article.
+    m.rotation.set(
+      deg2rad(this.config.rollDeg),       // X = roll (along flow)
+      deg2rad(this.config.yawDeg),        // Y = yaw (vertical)
+      deg2rad(this.config.pitchDeg),      // Z = pitch (side axis)
+    );
+    m.scale.setScalar(Math.max(0.01, this.config.scaleMul));
+    m.updateMatrixWorld(true);
+
+    if (this.orientDebounceId !== null) clearTimeout(this.orientDebounceId);
+    this.orientDebounceId = setTimeout(() => {
+      this.orientDebounceId = null;
+      // Re-extract geometry into the LBM + GPU obstacle pipelines so the
+      // physics follows the new orientation. NOTE: we deliberately do NOT
+      // call resetAllParticles here — wiping the pool on every slider input
+      // produces a stop-start inflow. Any particle now overlapping the new
+      // mask volume will be carried out by neighbour velocities within a
+      // frame or two, and the age tick guarantees they cycle within ~10s.
+      this.uploadObstacleToFluidSurface();
+    }, 100);
+  }
+
   private rebuildObstacle() {
     if (this.obstacleMesh) {
       this.scene.remove(this.obstacleMesh);
@@ -694,6 +799,15 @@ export class App {
     }
 
     this.obstacleMesh.position.set(x, 0, 0);
+    // Apply current orientation + scale sliders before voxelizing so the
+    // LBM mask matches what's on screen.
+    const deg2rad = (d: number) => (d * Math.PI) / 180;
+    this.obstacleMesh.rotation.set(
+      deg2rad(this.config.rollDeg),
+      deg2rad(this.config.yawDeg),
+      deg2rad(this.config.pitchDeg),
+    );
+    this.obstacleMesh.scale.setScalar(Math.max(0.01, this.config.scaleMul));
     this.scene.add(this.obstacleMesh);
 
     // Update the obstacle bound, then WIPE all particles (per user spec —
@@ -742,6 +856,14 @@ export class App {
         this.disposeMeshOrGroup(this.obstacleMesh);
         const mesh = new THREE.Mesh(geom, this.makeMat());
         mesh.position.set(x, 0, 0);
+        // Carry the current orientation/scale slider state into the swap.
+        const d2r = (d: number) => (d * Math.PI) / 180;
+        mesh.rotation.set(
+          d2r(this.config.rollDeg),
+          d2r(this.config.yawDeg),
+          d2r(this.config.pitchDeg),
+        );
+        mesh.scale.setScalar(Math.max(0.01, this.config.scaleMul));
         this.obstacleMesh = mesh;
         this.scene.add(this.obstacleMesh);
         this.uploadObstacleToFluidSurface();

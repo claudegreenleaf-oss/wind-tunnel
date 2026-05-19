@@ -633,7 +633,10 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
     if exited {
       needsReseed = true;
     } else {
-      p = vec4(pos, p.w + dt / 60.0);
+      // Age tick: dt/6 means a stuck particle in an eddy still ages out within
+      // ~maxAge/(dt/6) frames — about 10 s at simSpeed=1 — so the inlet pool
+      // keeps cycling even when downstream flow stalls behind the obstacle.
+      p = vec4(pos, p.w + dt / 6.0);
     }
   }
 

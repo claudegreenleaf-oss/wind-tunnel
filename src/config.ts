@@ -20,6 +20,12 @@ export interface SimConfig {
   freeSlip: boolean;  // true = free-slip walls, false = no-slip (bounce-back)
   // Shape
   shapeId: string;
+  // Obstacle orientation (Euler angles, deg) + uniform scale multiplier.
+  // Applied on top of each model's authored orientation; user-driven via sliders.
+  yawDeg: number;     // rotation around vertical (Y) axis
+  pitchDeg: number;   // rotation around side (Z) axis
+  rollDeg: number;    // rotation around flow (X) axis
+  scaleMul: number;   // 1 = registry default size
   // Visualization
   dyeAmount: number;
   // Time
@@ -38,6 +44,10 @@ export function defaultConfig(): SimConfig {
     useLES: false,
     freeSlip: false,
     shapeId: 'sphere',
+    yawDeg: 0,
+    pitchDeg: 0,
+    rollDeg: 0,
+    scaleMul: 1,
     dyeAmount: 1.0,
     paused: false,
     simSpeed: 1.0,
