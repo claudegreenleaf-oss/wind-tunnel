@@ -80,6 +80,10 @@ export class FluidSurfaceRenderer {
   private macrosView: GPUTextureView | null = null;
   private macrosSampler: GPUSampler;
 
+  // LBM voxel mask: exact obstacle shape, used to clip particles inside obstacle.
+  private maskBuffer: GPUBuffer | null = null;
+  private maskDims: [number, number, number] = [0, 0, 0];
+
   constructor(
     device: GPUDevice,
     canvasFormat: GPUTextureFormat,
@@ -106,9 +110,10 @@ export class FluidSurfaceRenderer {
     //   aabbMax           vec4  (16)
     //   sliceMask         vec4  (16) [axis, pos, active, thickness]
     //   obstacle          vec4  (16) [centerX, centerY, centerZ, radius]
-    //   total: 352 bytes
+    //   latticeDims       vec4  (16) [W, H, D, _]
+    //   total: 368 bytes
     this.uniformBuf = device.createBuffer({
-      size: 352,
+      size: 368,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -180,13 +185,15 @@ export class FluidSurfaceRenderer {
       ],
     });
 
-    // Direct sphere render: vertex needs particles + uniforms; fragment needs macros + sampler.
+    // Direct sphere render: vertex needs particles + uniforms + voxel mask;
+    // fragment needs macros + sampler.
     this.directSphereBgl = dev.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '3d' } },
         { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+        { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
 
@@ -413,7 +420,7 @@ export class FluidSurfaceRenderer {
     // Pack uniforms (RenderUniforms struct in WGSL).
     const invProj = proj.clone().invert();
     const invView = view.clone().invert();
-    const buf = new Float32Array(88);
+    const buf = new Float32Array(92);
     buf[0] = 1 / w; buf[1] = 1 / h; buf[2] = 0; buf[3] = 0;
     buf[4] = sphereSize; buf[5] = time; buf[6] = 0; buf[7] = 0;
     buf.set(invProj.elements, 8);
@@ -429,6 +436,8 @@ export class FluidSurfaceRenderer {
     buf[85] = this.obstacleCenter[1];
     buf[86] = this.obstacleCenter[2];
     buf[87] = this.obstacleRadius;
+    // latticeDims
+    buf[88] = this.maskDims[0]; buf[89] = this.maskDims[1]; buf[90] = this.maskDims[2]; buf[91] = 0;
     this.device.queue.writeBuffer(this.uniformBuf, 0, buf.buffer);
 
     const enc = this.device.createCommandEncoder({ label: 'fluid-surface' });
@@ -564,6 +573,13 @@ export class FluidSurfaceRenderer {
     this.obstacleRadius = radius;
   }
 
+  /** Bind the LBM voxel mask for exact-shape obstacle culling. */
+  setMaskBuffer(buf: GPUBuffer, dims: { W: number; H: number; D: number }) {
+    this.maskBuffer = buf;
+    this.maskDims = [dims.W, dims.H, dims.D];
+    this.directSphereBG = null;   // force rebuild with new binding
+  }
+
   /**
    * Render particles as colored opaque impostor spheres straight to canvas.
    * No SSFR filter — each particle is an individual lit sphere.
@@ -592,6 +608,7 @@ export class FluidSurfaceRenderer {
       this.directSphereBG = null;
     }
     if (!this.directSphereBG) {
+      if (!this.maskBuffer) return;
       this.directSphereBG = this.device.createBindGroup({
         layout: this.directSphereBgl,
         entries: [
@@ -599,6 +616,7 @@ export class FluidSurfaceRenderer {
           { binding: 1, resource: { buffer: this.uniformBuf } },
           { binding: 2, resource: this.macrosView },
           { binding: 3, resource: this.macrosSampler },
+          { binding: 4, resource: { buffer: this.maskBuffer } },
         ],
       });
     }
@@ -606,7 +624,7 @@ export class FluidSurfaceRenderer {
     // Pack uniforms.
     const invProj = proj.clone().invert();
     const invView = view.clone().invert();
-    const buf = new Float32Array(88);
+    const buf = new Float32Array(92);
     buf[0] = 1 / w; buf[1] = 1 / h; buf[2] = 0; buf[3] = 0;
     buf[4] = sphereSize; buf[5] = time; buf[6] = 0; buf[7] = 0;
     buf.set(invProj.elements, 8);
@@ -620,11 +638,13 @@ export class FluidSurfaceRenderer {
     buf[81] = this.sliceMaskPos;
     buf[82] = this.sliceMaskActive ? 1 : 0;
     buf[83] = this.sliceMaskThickness;
-    // obstacle
+    // obstacle (kept but unused now that we use mask)
     buf[84] = this.obstacleCenter[0];
     buf[85] = this.obstacleCenter[1];
     buf[86] = this.obstacleCenter[2];
     buf[87] = this.obstacleRadius;
+    // latticeDims
+    buf[88] = this.maskDims[0]; buf[89] = this.maskDims[1]; buf[90] = this.maskDims[2]; buf[91] = 0;
     this.device.queue.writeBuffer(this.uniformBuf, 0, buf.buffer);
 
     const enc = this.device.createCommandEncoder({ label: 'direct-spheres' });
@@ -674,7 +694,8 @@ struct RenderUniforms {
     aabbMin       : vec4f,    // x, y, z, pad
     aabbMax       : vec4f,    // x, y, z, pad
     sliceMask     : vec4f,    // axis (0=x,1=y,2=z), pos[0..1], active (0/1), thickness[0..1]
-    obstacle      : vec4f,    // centerX, centerY, centerZ, radius
+    obstacle      : vec4f,    // centerX, centerY, centerZ, radius (kept for back-compat)
+    latticeDims   : vec4f,    // W, H, D, _
 };
 `;
 
@@ -1055,6 +1076,7 @@ const DIRECT_SPHERE_WGSL = UNIFORMS_WGSL + /* wgsl */`
 @group(0) @binding(1) var<uniform> u : RenderUniforms;
 @group(0) @binding(2) var macrosTex : texture_3d<f32>;
 @group(0) @binding(3) var macrosSamp : sampler;
+@group(0) @binding(4) var<storage, read> voxelMask : array<u32>;   // 0=fluid, 1=wall
 
 struct VertOut {
   @builtin(position) position : vec4f,
@@ -1107,13 +1129,21 @@ fn vs_sphere(@builtin(vertex_index) vi : u32, @builtin(instance_index) ii : u32)
     }
   }
 
-  // Obstacle cull: hide particles whose center is inside the obstacle bounding
-  // sphere so the obstacle mesh shows through. Particles still EXIST in the
-  // buffer (only event-driven kill mutates them), but we don't draw them.
-  let r2 = u.obstacle.w * u.obstacle.w;
-  if r2 > 0.0 {
-    let d = worldPos - u.obstacle.xyz;
-    if dot(d, d) < r2 { clipped = true; }
+  // Exact obstacle cull via LBM voxel mask: clip particles whose lattice
+  // cell is flagged as solid (mask == 1). Uses the EXACT voxelized shape,
+  // so the cull region matches the mesh — no bounding-sphere overshoot.
+  let W = i32(u.latticeDims.x);
+  let H = i32(u.latticeDims.y);
+  let D = i32(u.latticeDims.z);
+  if W > 0 && H > 0 && D > 0 {
+    let aabbSizeC = u.aabbMax.xyz - u.aabbMin.xyz;
+    let lUvw2 = (worldPos - u.aabbMin.xyz) / aabbSizeC;
+    let xi = i32(clamp(lUvw2.x * f32(W), 0.0, f32(W - 1)));
+    let yi = i32(clamp(lUvw2.y * f32(H), 0.0, f32(H - 1)));
+    let zi = i32(clamp(lUvw2.z * f32(D), 0.0, f32(D - 1)));
+    let idx = u32(zi * W * H + yi * W + xi);
+    let flag = voxelMask[idx];
+    if flag == 1u { clipped = true; }
   }
 
   let viewPos = (u.viewMat * vec4f(worldPos, 1.0)).xyz;

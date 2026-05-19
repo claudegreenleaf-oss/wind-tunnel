@@ -164,6 +164,7 @@ export class App {
         this.particles.N,
       );
       this.fluidSurface.setMacrosTexture(this.lbm.macrosTextureView);
+      this.fluidSurface.setMaskBuffer(this.lbm.maskBuffer, latticeDims(this.config.N));
 
       // Picture-in-picture slice viewer (its own canvas in the corner).
       const sliceCanvas = document.getElementById('slice-canvas') as HTMLCanvasElement | null;
@@ -295,7 +296,20 @@ export class App {
     stepBtn.addEventListener('click', () => {
       if (this.config.paused) {
         this.lbm?.step();
+        this.dye?.step();
         this.simStepCount++;
+        // Also advance the particles one frame so they visibly move on Step.
+        if (this.particles && this.lbm) {
+          this.camera.updateMatrixWorld();
+          const view = this.camera.matrixWorldInverse;
+          const proj = this.camera.projectionMatrix;
+          const camPos = this.camera.position;
+          const { sx, sy, sz } = this.latticeWorld();
+          const aabbMin = new THREE.Vector3(-sx * 0.5, -sy * 0.5, -sz * 0.5);
+          const aabbMax = new THREE.Vector3(sx * 0.5, sy * 0.5, sz * 0.5);
+          const { W, H, D } = latticeDims(this.config.N);
+          this.particles.advectOnly(view, proj, camPos, aabbMin, aabbMax, { W, H, D });
+        }
       }
     });
 

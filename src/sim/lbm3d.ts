@@ -31,6 +31,9 @@ export class LBM3D {
   private fA!: GPUBuffer;
   private fB!: GPUBuffer;
   private maskBuf!: GPUBuffer;
+
+  /** Public access to the voxelized obstacle mask. 0=fluid, 1=wall, 2=inlet, 3=outlet. */
+  get maskBuffer(): GPUBuffer { return this.maskBuf; }
   private paramsBuf!: GPUBuffer;
   private macrosTex!: GPUTexture;
   private macrosView!: GPUTextureView;
