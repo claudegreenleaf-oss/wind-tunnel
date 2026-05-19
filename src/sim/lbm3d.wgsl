@@ -216,10 +216,20 @@ fn cs_step(@builtin(global_invocation_id) gid: vec3<u32>) {
     u = u + force / (2.0 * rho);
   }
 
-  // Inlet column: force equilibrium
+  // Inlet column: force equilibrium ONLY inside a small centered disc (jet).
+  // Outside the disc is held at zero velocity = closed wall. Smooth profile
+  // inside avoids the sharp shear layer that triggers vortex shedding.
   if (gid.x == 0u) {
+    let H = f32(params.dims.y);
+    let D = f32(params.dims.z);
+    let cy = (f32(gid.y) + 0.5) / H - 0.5;
+    let cz = (f32(gid.z) + 0.5) / D - 0.5;
+    let r = sqrt(cy * cy + cz * cz);
+    let jetR = 0.12;                                 // small jet — ~24% of cross-section
+    let edgeBlend = 0.04;                            // smooth boundary
+    let profile = 1.0 - smoothstep(jetR - edgeBlend, jetR + edgeBlend, r);
     rho = 1.0;
-    u = uInVec;
+    u = uInVec * profile;
     for (var i = 0u; i < 19u; i = i + 1u) {
       f[i] = feq(i, rho, u);
     }

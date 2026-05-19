@@ -16,16 +16,26 @@ import * as THREE from 'three';
 export class ParticleSystem {
   private device: GPUDevice;
   private canvasFormat: GPUTextureFormat;
+  private trailFormat: GPUTextureFormat = 'rgba16float';
   private getCanvasTextureView: () => GPUTextureView;
+  private getCanvasSize: () => [number, number];
 
-  /** Total particles. ~200k is plenty for an obvious wind-tunnel feel and runs at 60fps. */
-  N = 200_000;
+  /** 70k particles → fewer, larger spheres make a smoother SSFR surface. */
+  N = 70_000;
 
   // GPU resources
   private particleBuf!: GPUBuffer;
+  private prevPosBuf!: GPUBuffer;
   private uniformBuf!: GPUBuffer;
   private sampler!: GPUSampler;
 
+  // T1: persistent trail render target — particles accumulate here over many frames.
+  private trailTex: GPUTexture | null = null;
+  private trailView: GPUTextureView | null = null;
+  private trailW = 0;
+  private trailH = 0;
+
+  // Particle compute + render (renders into trail RT)
   private advectPipeline!: GPUComputePipeline;
   private renderPipeline!: GPURenderPipeline;
   private advectBgl!: GPUBindGroupLayout;
@@ -33,16 +43,36 @@ export class ParticleSystem {
   private advectBG: GPUBindGroup | null = null;
   private renderBG: GPUBindGroup | null = null;
 
+  // T1: fade pass — multiplies trail RT by ~0.94 each frame.
+  private fadePipeline!: GPURenderPipeline;
+
+  // T2: composite pass — samples trail RT, bloom + tonemap, additive to canvas.
+  private compositePipeline!: GPURenderPipeline;
+  private compositeBgl!: GPUBindGroupLayout;
+  private compositeBG: GPUBindGroup | null = null;
+  private compositeSampler!: GPUSampler;
+
   private frame = 0;
+
+  // Obstacle bound (sphere): particles entering this volume get reseeded.
+  private obstacleCenter: [number, number, number] = [0, 0, 0];
+  private obstacleRadius = 0;
+
+  setObstacle(center: { x: number; y: number; z: number }, radius: number) {
+    this.obstacleCenter = [center.x, center.y, center.z];
+    this.obstacleRadius = radius;
+  }
 
   constructor(
     device: GPUDevice,
     canvasFormat: GPUTextureFormat,
     getCanvasTextureView: () => GPUTextureView,
+    getCanvasSize: () => [number, number],
   ) {
     this.device = device;
     this.canvasFormat = canvasFormat;
     this.getCanvasTextureView = getCanvasTextureView;
+    this.getCanvasSize = getCanvasSize;
     this.allocate();
     this.buildPipelines();
   }
@@ -64,6 +94,13 @@ export class ParticleSystem {
     }
     this.device.queue.writeBuffer(this.particleBuf, 0, init.buffer);
 
+    // Prev-position buffer (T3 motion-blur quads). w=0 = uninitialized.
+    this.prevPosBuf = this.device.createBuffer({
+      size: this.N * 4 * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(this.prevPosBuf, 0, new Float32Array(this.N * 4).buffer);
+
     // Uniform layout (256 bytes):
     //   viewMat mat4x4 (64)
     //   projMat mat4x4 (64)
@@ -82,6 +119,27 @@ export class ParticleSystem {
       magFilter: 'linear', minFilter: 'linear',
       addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge', addressModeW: 'clamp-to-edge',
     });
+
+    this.compositeSampler = this.device.createSampler({
+      magFilter: 'linear', minFilter: 'linear',
+      addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
+    });
+  }
+
+  /** Allocates / resizes the trail render target to match the canvas. */
+  private ensureTrailTex(w: number, h: number) {
+    if (this.trailTex && this.trailW === w && this.trailH === h) return;
+    this.trailTex?.destroy();
+    this.trailTex = this.device.createTexture({
+      label: 'particles-trail',
+      size: [w, h],
+      format: this.trailFormat,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.trailView = this.trailTex.createView();
+    this.trailW = w;
+    this.trailH = h;
+    this.compositeBG = null;   // rebuild composite bind group with new view
   }
 
   private buildPipelines() {
@@ -94,6 +152,7 @@ export class ParticleSystem {
         { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
         { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '3d' } },
         { binding: 3, visibility: GPUShaderStage.COMPUTE, sampler: { type: 'filtering' } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
       ],
     });
 
@@ -103,6 +162,7 @@ export class ParticleSystem {
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
         { binding: 2, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'float', viewDimension: '3d' } },
         { binding: 3, visibility: GPUShaderStage.VERTEX, sampler: { type: 'filtering' } },
+        { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
 
@@ -118,8 +178,8 @@ export class ParticleSystem {
         module: renderModule,
         entryPoint: 'fs_main',
         targets: [{
-          format: this.canvasFormat,
-          // Additive blend → particles glow on top of the existing canvas
+          // T1: render into the trail RT (HDR, rgba16float) instead of the canvas.
+          format: this.trailFormat,
           blend: {
             color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
             alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
@@ -128,6 +188,76 @@ export class ParticleSystem {
       },
       primitive: { topology: 'triangle-list' },
     });
+
+    // T1 fade pipeline: fullscreen quad, blend = (zero, constant) → multiplies trail by fadeFactor.
+    const fadeModule = this.device.createShaderModule({ code: FADE_WGSL, label: 'particles-fade' });
+    this.fadePipeline = this.device.createRenderPipeline({
+      layout: 'auto',
+      vertex: { module: fadeModule, entryPoint: 'vs_full' },
+      fragment: {
+        module: fadeModule,
+        entryPoint: 'fs_fade',
+        targets: [{
+          format: this.trailFormat,
+          blend: {
+            color: { srcFactor: 'zero', dstFactor: 'constant', operation: 'add' },
+            alpha: { srcFactor: 'zero', dstFactor: 'constant', operation: 'add' },
+          },
+        }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+
+    // T2 composite pipeline: samples trail, bloom + Reinhard tonemap, additive onto canvas.
+    const compositeModule = this.device.createShaderModule({ code: COMPOSITE_WGSL, label: 'particles-composite' });
+    this.compositeBgl = this.device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      ],
+    });
+    this.compositePipeline = this.device.createRenderPipeline({
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.compositeBgl] }),
+      vertex: { module: compositeModule, entryPoint: 'vs_full' },
+      fragment: {
+        module: compositeModule,
+        entryPoint: 'fs_composite',
+        targets: [{
+          format: this.canvasFormat,
+          // Alpha-over blend: semi-transparent fluid surface overlays the scene.
+          blend: {
+            color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+            alpha: { srcFactor: 'one',       dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          },
+        }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+  }
+
+  /** Expose the particle position buffer so external renderers (e.g. SSFR) can read it. */
+  getParticleBuffer(): GPUBuffer { return this.particleBuf; }
+
+  /** Run the advect compute pass only — no canvas/trail rendering. */
+  advectOnly(
+    view: THREE.Matrix4,
+    proj: THREE.Matrix4,
+    camPos: THREE.Vector3,
+    aabbMin: THREE.Vector3,
+    aabbMax: THREE.Vector3,
+    dims: { W: number; H: number; D: number },
+    options: { dt?: number; maxAge?: number; pointSize?: number } = {},
+  ) {
+    if (!this.advectBG) return;
+    const { dt = 6.0, maxAge = 600, pointSize = 0.014 } = options;
+    this.writeUniforms(view, proj, camPos, aabbMin, aabbMax, dims, dt, maxAge, pointSize);
+    const enc = this.device.createCommandEncoder({ label: 'particles-advect-only' });
+    const cp = enc.beginComputePass();
+    cp.setPipeline(this.advectPipeline);
+    cp.setBindGroup(0, this.advectBG);
+    cp.dispatchWorkgroups(Math.ceil(this.N / 64));
+    cp.end();
+    this.device.queue.submit([enc.finish()]);
   }
 
   setMacrosTexture(macrosView: GPUTextureView) {
@@ -138,6 +268,7 @@ export class ParticleSystem {
         { binding: 1, resource: { buffer: this.particleBuf } },
         { binding: 2, resource: macrosView },
         { binding: 3, resource: this.sampler },
+        { binding: 4, resource: { buffer: this.prevPosBuf } },
       ],
     });
     this.renderBG = this.device.createBindGroup({
@@ -147,6 +278,7 @@ export class ParticleSystem {
         { binding: 1, resource: { buffer: this.particleBuf } },
         { binding: 2, resource: macrosView },
         { binding: 3, resource: this.sampler },
+        { binding: 4, resource: { buffer: this.prevPosBuf } },
       ],
     });
   }
@@ -170,11 +302,21 @@ export class ParticleSystem {
     buf[40] = aabbMax.x; buf[41] = aabbMax.y; buf[42] = aabbMax.z; buf[43] = 0;
     buf[44] = dims.W; buf[45] = dims.H; buf[46] = dims.D; buf[47] = 0;
     buf[48] = dt; buf[49] = maxAge; buf[50] = this.frame; buf[51] = pointSize;
+    // Obstacle bound: center.xyz, radius.
+    buf[52] = this.obstacleCenter[0];
+    buf[53] = this.obstacleCenter[1];
+    buf[54] = this.obstacleCenter[2];
+    buf[55] = this.obstacleRadius;
     this.device.queue.writeBuffer(this.uniformBuf, 0, buf.buffer);
     this.frame++;
   }
 
-  /** Advect particles + render in one combined command buffer. */
+  /**
+   * Three-pass pipeline:
+   *   1. fade trail RT by 0.94 (multiplicative blend)
+   *   2. advect compute + draw particles into trail RT (additive)
+   *   3. composite trail → canvas (bloom + Reinhard tonemap, additive)
+   */
   step(
     view: THREE.Matrix4,
     proj: THREE.Matrix4,
@@ -182,38 +324,82 @@ export class ParticleSystem {
     aabbMin: THREE.Vector3,
     aabbMax: THREE.Vector3,
     dims: { W: number; H: number; D: number },
-    options: { dt?: number; maxAge?: number; pointSize?: number } = {},
+    options: { dt?: number; maxAge?: number; pointSize?: number; fade?: number } = {},
   ) {
     if (!this.advectBG || !this.renderBG) return;
-    const { dt = 6.0, maxAge = 600, pointSize = 0.012 } = options;
+    const { dt = 6.0, maxAge = 600, pointSize = 0.014, fade = 0.70 } = options;
     this.writeUniforms(view, proj, camPos, aabbMin, aabbMax, dims, dt, maxAge, pointSize);
+
+    // Ensure trail RT sized to canvas.
+    const [cw, ch] = this.getCanvasSize();
+    if (cw <= 0 || ch <= 0) return;
+    this.ensureTrailTex(cw, ch);
+    if (!this.trailView) return;
+
+    // Build composite bind group once per trail RT lifetime.
+    if (!this.compositeBG) {
+      this.compositeBG = this.device.createBindGroup({
+        layout: this.compositeBgl,
+        entries: [
+          { binding: 0, resource: this.trailView },
+          { binding: 1, resource: this.compositeSampler },
+        ],
+      });
+    }
 
     const enc = this.device.createCommandEncoder({ label: 'particles' });
 
-    // Compute pass: advect
-    const cp = enc.beginComputePass();
-    cp.setPipeline(this.advectPipeline);
-    cp.setBindGroup(0, this.advectBG);
-    cp.dispatchWorkgroups(Math.ceil(this.N / 64));
-    cp.end();
+    // (1) Fade the trail RT by the multiplicative blend constant.
+    {
+      const rp = enc.beginRenderPass({
+        colorAttachments: [{ view: this.trailView, loadOp: 'load', storeOp: 'store' }],
+      });
+      rp.setPipeline(this.fadePipeline);
+      rp.setBlendConstant({ r: fade, g: fade, b: fade, a: fade });
+      rp.draw(3);
+      rp.end();
+    }
 
-    // Render pass: draw billboards. Load existing canvas contents.
-    const canvasView = this.getCanvasTextureView();
-    const rp = enc.beginRenderPass({
-      colorAttachments: [{ view: canvasView, loadOp: 'load', storeOp: 'store' }],
-    });
-    rp.setPipeline(this.renderPipeline);
-    rp.setBindGroup(0, this.renderBG);
-    // 6 vertices per particle (two triangles forming a quad)
-    rp.draw(6 * this.N, 1, 0, 0);
-    rp.end();
+    // (2) Compute advect.
+    {
+      const cp = enc.beginComputePass();
+      cp.setPipeline(this.advectPipeline);
+      cp.setBindGroup(0, this.advectBG);
+      cp.dispatchWorkgroups(Math.ceil(this.N / 64));
+      cp.end();
+    }
+
+    // (2b) Draw particles into the trail RT additively.
+    {
+      const rp = enc.beginRenderPass({
+        colorAttachments: [{ view: this.trailView, loadOp: 'load', storeOp: 'store' }],
+      });
+      rp.setPipeline(this.renderPipeline);
+      rp.setBindGroup(0, this.renderBG);
+      rp.draw(6 * this.N, 1, 0, 0);
+      rp.end();
+    }
+
+    // (3) Composite trail → canvas with bloom + tonemap.
+    {
+      const canvasView = this.getCanvasTextureView();
+      const rp = enc.beginRenderPass({
+        colorAttachments: [{ view: canvasView, loadOp: 'load', storeOp: 'store' }],
+      });
+      rp.setPipeline(this.compositePipeline);
+      rp.setBindGroup(0, this.compositeBG);
+      rp.draw(3);
+      rp.end();
+    }
 
     this.device.queue.submit([enc.finish()]);
   }
 
   dispose() {
     this.particleBuf?.destroy();
+    this.prevPosBuf?.destroy();
     this.uniformBuf?.destroy();
+    this.trailTex?.destroy();
   }
 }
 
@@ -226,6 +412,7 @@ struct Uniforms {
   aabbMax   : vec4<f32>,
   dims      : vec4<f32>,        // W, H, D, _
   params    : vec4<f32>,        // dt, maxAge, frameSeed, pointSize
+  obstacle  : vec4<f32>,        // centerX, centerY, centerZ, radius
 };
 
 fn hash11(n : f32) -> f32 {
@@ -239,15 +426,102 @@ fn hash31(seed : f32, i : u32) -> vec3<f32> {
   );
 }
 
-fn inferno(t : f32) -> vec3<f32> {
+// ---- value noise + curl noise (Bridson 2007 style turbulence injection) ----
+// Cheap hashed value noise: 3D trilinear interpolation of per-corner hashes.
+fn hash13(p : vec3<f32>) -> f32 {
+  var q = fract(p * 0.1031);
+  q += dot(q, q.zyx + 31.32);
+  return fract((q.x + q.y) * q.z);
+}
+
+fn vnoise(p : vec3<f32>) -> f32 {
+  let i = floor(p);
+  let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  let n000 = hash13(i + vec3(0.0, 0.0, 0.0));
+  let n100 = hash13(i + vec3(1.0, 0.0, 0.0));
+  let n010 = hash13(i + vec3(0.0, 1.0, 0.0));
+  let n110 = hash13(i + vec3(1.0, 1.0, 0.0));
+  let n001 = hash13(i + vec3(0.0, 0.0, 1.0));
+  let n101 = hash13(i + vec3(1.0, 0.0, 1.0));
+  let n011 = hash13(i + vec3(0.0, 1.0, 1.0));
+  let n111 = hash13(i + vec3(1.0, 1.0, 1.0));
+  let nx00 = mix(n000, n100, u.x);
+  let nx10 = mix(n010, n110, u.x);
+  let nx01 = mix(n001, n101, u.x);
+  let nx11 = mix(n011, n111, u.x);
+  let nxy0 = mix(nx00, nx10, u.y);
+  let nxy1 = mix(nx01, nx11, u.y);
+  return mix(nxy0, nxy1, u.z) * 2.0 - 1.0;   // remap to [-1, 1]
+}
+
+// Vector potential: three decorrelated noise fields. Curl of this is
+// divergence-free, so adding it to a flow doesn't pump mass anywhere.
+fn potential(p : vec3<f32>) -> vec3<f32> {
+  return vec3(
+    vnoise(p),
+    vnoise(p + vec3(31.41, 91.72, 17.83)),
+    vnoise(p + vec3(67.19, 23.55, 81.13)),
+  );
+}
+
+// Divergence-free curl noise at point p. Output is the velocity perturbation.
+fn curlNoise(p : vec3<f32>) -> vec3<f32> {
+  let eps = 0.6;
+  let dx = vec3(eps, 0.0, 0.0);
+  let dy = vec3(0.0, eps, 0.0);
+  let dz = vec3(0.0, 0.0, eps);
+  let p_xp = potential(p + dx);
+  let p_xn = potential(p - dx);
+  let p_yp = potential(p + dy);
+  let p_yn = potential(p - dy);
+  let p_zp = potential(p + dz);
+  let p_zn = potential(p - dz);
+  let curlX = (p_yp.z - p_yn.z) - (p_zp.y - p_zn.y);
+  let curlY = (p_zp.x - p_zn.x) - (p_xp.z - p_xn.z);
+  let curlZ = (p_xp.y - p_xn.y) - (p_yp.x - p_yn.x);
+  return vec3(curlX, curlY, curlZ) / (2.0 * eps);
+}
+
+// Two-octave curl noise: large + small structures stacked for fractal detail.
+fn curlNoiseFbm(p : vec3<f32>, t : f32) -> vec3<f32> {
+  let pAnim = p + vec3(t * 0.07, t * 0.03, -t * 0.05);
+  let big   = curlNoise(pAnim * 0.7);
+  let small = curlNoise(pAnim * 2.3 + vec3(11.0, 7.0, 3.0)) * 0.45;
+  return big + small;
+}
+
+// Cold "frost" palette: deep navy → royal blue → ice cyan → frost white → pale lavender.
+// Stays in cyan-blue-white range, no warm tones — feels like cryogenic wind tunnel.
+fn turbo(t : f32) -> vec3<f32> {
   let tt = clamp(t, 0.0, 1.0);
-  let c0 = vec3(0.04, 0.05, 0.20);
-  let c1 = vec3(0.55, 0.06, 0.55);
-  let c2 = vec3(1.00, 0.40, 0.30);
-  let c3 = vec3(1.00, 0.92, 0.55);
-  if tt < 0.33 { return mix(c0, c1, tt * 3.0); }
-  if tt < 0.66 { return mix(c1, c2, (tt - 0.33) * 3.0); }
-  return mix(c2, c3, (tt - 0.66) * 3.0);
+  let c0 = vec3(0.02, 0.05, 0.18);   // abyssal navy
+  let c1 = vec3(0.08, 0.22, 0.65);   // deep ocean blue
+  let c2 = vec3(0.15, 0.55, 1.00);   // electric blue
+  let c3 = vec3(0.35, 0.92, 1.10);   // ice cyan
+  let c4 = vec3(0.85, 0.98, 1.10);   // frost white
+  let c5 = vec3(0.85, 0.80, 1.15);   // pale lavender pop
+  if tt < 0.2 { return mix(c0, c1, tt * 5.0); }
+  if tt < 0.4 { return mix(c1, c2, (tt - 0.2) * 5.0); }
+  if tt < 0.6 { return mix(c2, c3, (tt - 0.4) * 5.0); }
+  if tt < 0.8 { return mix(c3, c4, (tt - 0.6) * 5.0); }
+  return mix(c4, c5, (tt - 0.8) * 5.0);
+}
+
+// Cheap vorticity proxy: how much the velocity field bends across a small
+// stencil. High when streamlines curl (wake / shear layer), low in laminar flow.
+fn vorticityMag(macrosTex : texture_3d<f32>, samp : sampler, uvw : vec3<f32>, dims : vec3<f32>) -> f32 {
+  let h = 1.5 / dims;
+  let vxp = textureSampleLevel(macrosTex, samp, uvw + vec3(h.x, 0.0, 0.0), 0.0).xyz;
+  let vxn = textureSampleLevel(macrosTex, samp, uvw - vec3(h.x, 0.0, 0.0), 0.0).xyz;
+  let vyp = textureSampleLevel(macrosTex, samp, uvw + vec3(0.0, h.y, 0.0), 0.0).xyz;
+  let vyn = textureSampleLevel(macrosTex, samp, uvw - vec3(0.0, h.y, 0.0), 0.0).xyz;
+  let vzp = textureSampleLevel(macrosTex, samp, uvw + vec3(0.0, 0.0, h.z), 0.0).xyz;
+  let vzn = textureSampleLevel(macrosTex, samp, uvw - vec3(0.0, 0.0, h.z), 0.0).xyz;
+  let curlX = (vyp.z - vyn.z) - (vzp.y - vzn.y);
+  let curlY = (vzp.x - vzn.x) - (vxp.z - vxn.z);
+  let curlZ = (vxp.y - vxn.y) - (vyp.x - vyn.x);
+  return length(vec3(curlX, curlY, curlZ));
 }
 `;
 
@@ -256,6 +530,7 @@ const ADVECT_WGSL = COMMON_WGSL + /* wgsl */`
 @group(0) @binding(1) var<storage, read_write> particles : array<vec4<f32>>;
 @group(0) @binding(2) var macrosTex : texture_3d<f32>;
 @group(0) @binding(3) var samp      : sampler;
+@group(0) @binding(4) var<storage, read_write> prevPos : array<vec4<f32>>;
 
 const INVALID : f32 = 9999.0;
 
@@ -265,6 +540,8 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
   if idx >= arrayLength(&particles) { return; }
 
   var p = particles[idx];
+  let oldPos = p.xyz;
+  let prevValid = prevPos[idx].w;
   let aabbMin = u.aabbMin.xyz;
   let aabbMax = u.aabbMax.xyz;
   let aabbSize = aabbMax - aabbMin;
@@ -274,30 +551,80 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
 
   var needsReseed : bool = p.w >= maxAge;
   if !needsReseed {
-    let uvw = (p.xyz - aabbMin) / aabbSize;
-    if any(uvw < vec3(0.0)) || any(uvw > vec3(1.0)) {
+    // Multi-step advection (T4): 8 sub-steps of dt/8 per frame. This resolves
+    // curved flow paths around the obstacle cleanly instead of smearing.
+    // No procedural noise — let the LBM physics drive trajectory shape.
+    let SUBSTEPS = 8;
+    let subDt = dt / f32(SUBSTEPS);
+    var pos = p.xyz;
+    var exited = false;
+    var insideObstacle = false;
+    let obstacleR2 = u.obstacle.w * u.obstacle.w;
+    for (var k = 0; k < SUBSTEPS; k = k + 1) {
+      let uvwSub = (pos - aabbMin) / aabbSize;
+      if any(uvwSub < vec3(0.0)) || any(uvwSub > vec3(1.0)) {
+        exited = true;
+        break;
+      }
+      // Kill particles that enter the obstacle bound — they shouldn't exist inside.
+      let d = pos - u.obstacle.xyz;
+      if obstacleR2 > 0.0 && dot(d, d) < obstacleR2 {
+        insideObstacle = true;
+        break;
+      }
+      let macros = textureSampleLevel(macrosTex, samp, uvwSub, 0.0);
+      let vel_world = macros.xyz * (aabbSize / u.dims.xyz);
+      pos = pos + vel_world * subDt;
+    }
+    if exited || insideObstacle {
       needsReseed = true;
     } else {
-      // Advect by velocity field. macros.xyz is in lattice units; scale to world.
-      let macros = textureSampleLevel(macrosTex, samp, uvw, 0.0);
-      let vel_world = macros.xyz * (aabbSize / u.dims.xyz);
-      p = vec4(p.xyz + vel_world * dt, p.w + dt / 60.0);
+      p = vec4(pos, p.w + dt / 60.0);
     }
   }
 
   if needsReseed {
     let r = hash31(seed, idx);
-    // Seed in a small slab right inside the inlet
-    let inletX = aabbMin.x + 0.02 * aabbSize.x;
-    p = vec4(
-      inletX + r.x * 0.005 * aabbSize.x,
-      aabbMin.y + r.y * aabbSize.y,
-      aabbMin.z + r.z * aabbSize.z,
-      hash11(f32(idx) * 0.41 + seed) * maxAge * 0.6,  // staggered age so particles don't all reseed in sync
-    );
+    // Sample a point inside the inlet jet disc (matches LBM jet radius).
+    let theta = r.x * 6.2831853;
+    let radius = sqrt(r.y) * 0.12;
+    let dy = radius * cos(theta);
+    let dz = radius * sin(theta);
+    let centerY = aabbMin.y + 0.5 * aabbSize.y;
+    let centerZ = aabbMin.z + 0.5 * aabbSize.z;
+    let jetY = centerY + dy * aabbSize.y;
+    let jetZ = centerZ + dz * aabbSize.z;
+
+    // First-time seed (age set to 9999 on JS init) — distribute along the jet
+    // tube length so the volume looks populated immediately. Subsequent reseeds
+    // come back to the inlet face.
+    let isInitialSeed : bool = p.w > 9000.0;
+    if isInitialSeed {
+      p = vec4(
+        aabbMin.x + r.z * aabbSize.x,
+        jetY,
+        jetZ,
+        hash11(f32(idx) * 0.41 + seed) * maxAge * 0.9,
+      );
+    } else {
+      let inletX = aabbMin.x + 0.02 * aabbSize.x;
+      p = vec4(
+        inletX + r.z * 0.01 * aabbSize.x,
+        jetY,
+        jetZ,
+        hash11(f32(idx) * 0.41 + seed) * maxAge * 0.6,
+      );
+    }
   }
 
   particles[idx] = p;
+
+  // T3: save prev_pos for next-frame motion-blur quad.
+  // On reseed (or uninitialized), set prev = current so the quad collapses to a dot
+  // rather than streaking from origin.
+  let didReseed = needsReseed;
+  let usePrev = select(p.xyz, oldPos, prevValid > 0.5 && !didReseed);
+  prevPos[idx] = vec4(usePrev, 1.0);
 }
 `;
 
@@ -306,12 +633,15 @@ const RENDER_WGSL = COMMON_WGSL + /* wgsl */`
 @group(0) @binding(1) var<storage, read> particles : array<vec4<f32>>;
 @group(0) @binding(2) var macrosTex : texture_3d<f32>;
 @group(0) @binding(3) var samp      : sampler;
+@group(0) @binding(4) var<storage, read> prevPos : array<vec4<f32>>;
 
 struct VertOut {
   @builtin(position) pos : vec4<f32>,
   @location(0) localUv   : vec2<f32>,
   @location(1) speed     : f32,
   @location(2) ageFrac   : f32,
+  @location(3) vort      : f32,
+  @location(4) sizeScale : f32,
 };
 
 // Quad-vertex offsets (two triangles forming a centered quad)
@@ -325,43 +655,202 @@ fn vs_main(@builtin(vertex_index) vi : u32) -> VertOut {
   let particleIdx = vi / 6u;
   let vIdx = vi % 6u;
   let p = particles[particleIdx];
+  let prev = prevPos[particleIdx].xyz;
+  let curr = p.xyz;
+  let mid  = (prev + curr) * 0.5;
+  let dPos = curr - prev;
+  let dLen = length(dPos);
 
-  // Sample velocity at particle position for speed-coloring.
+  // Sample velocity at the midpoint for color/intensity.
   let aabbMin = u.aabbMin.xyz;
   let aabbMax = u.aabbMax.xyz;
   let aabbSize = aabbMax - aabbMin;
-  let uvw = clamp((p.xyz - aabbMin) / aabbSize, vec3(0.0), vec3(1.0));
+  let uvw = clamp((mid - aabbMin) / aabbSize, vec3(0.0), vec3(1.0));
   let macros = textureSampleLevel(macrosTex, samp, uvw, 0.0);
   let speed = length(macros.xyz);
 
-  // Camera-facing billboard
+  // Per-particle hash drives stable hue variation between neighbors.
+  let vort = hash11(f32(particleIdx) * 0.137);
+  let speedN = clamp(speed / 0.18, 0.0, 1.0);
+  let vortN  = vort;
+
+  // Build streak basis aligned with the prev→curr motion vector. When the
+  // particle is nearly stationary, blend to a camera-facing dot.
   let camRight = vec3(u.viewMat[0][0], u.viewMat[1][0], u.viewMat[2][0]);
   let camUp    = vec3(u.viewMat[0][1], u.viewMat[1][1], u.viewMat[2][1]);
-  let off = QUAD_OFF[vIdx] * u.params.w;
-  let worldPos = p.xyz + camRight * off.x + camUp * off.y;
+  let viewDir  = normalize(mid - u.cameraPos.xyz);
+
+  let motionDir = select(camRight, dPos / max(dLen, 1e-6), dLen > 1e-6);
+  let perpRaw = cross(motionDir, viewDir);
+  let perpLen = length(perpRaw);
+  let perpAxis = select(camUp, perpRaw / max(perpLen, 1e-6), perpLen > 1e-4);
+  let streakAxis = normalize(cross(viewDir, perpAxis));
+
+  // Fluid surface mode: render each particle as a round metaball-style blob.
+  // No streak elongation — particles fuse into a cohesive fluid mass.
+  let rad = u.params.w * 0.7 * (0.85 + 0.4 * speedN);
+
+  let off = QUAD_OFF[vIdx];
+  let worldPos = mid
+    + streakAxis * (off.x * rad)
+    + perpAxis   * (off.y * rad);
 
   var out : VertOut;
   out.pos = u.projMat * u.viewMat * vec4(worldPos, 1.0);
   out.localUv = QUAD_OFF[vIdx];
   out.speed = speed;
   out.ageFrac = clamp(p.w / max(u.params.y, 1.0), 0.0, 1.0);
+  out.vort = vort;
+  out.sizeScale = rad;
   return out;
 }
 
 @fragment
 fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
+  // Smooth gaussian disc → particles fuse into a cohesive fluid mass.
   let r2 = dot(in.localUv, in.localUv);
   if r2 > 1.0 { discard; }
 
-  // Soft radial alpha falloff
-  let falloff = exp(-r2 * 3.5);
-  let speedN = clamp(in.speed / 0.18, 0.0, 1.0);
-  let col = inferno(0.15 + speedN * 0.85);
+  // Metaball falloff: bright dense center, smooth zero at edge.
+  let density = exp(-r2 * 2.5);
 
-  // Particles fade out as they age so trails fade in
-  let lifeFade = 1.0 - in.ageFrac * 0.4;
-  let alpha = falloff * (0.18 + 0.7 * speedN) * lifeFade;
+  let speedN = clamp(in.speed / 0.16, 0.0, 1.0);
 
-  return vec4(col * (0.6 + 1.4 * speedN), alpha);
+  // Output RGB = a velocity-tinted color, A = thickness contribution.
+  // Per-particle thickness is small — fluid mass builds via overlap density.
+  let col = turbo(0.25 + speedN * 0.7);
+  let lifeFade = 1.0 - in.ageFrac * 0.45;
+  let thickness = density * 0.04 * lifeFade;
+
+  return vec4(col * thickness, thickness);
+}
+`;
+
+// T1 fade pass: fullscreen quad that, combined with blend = (zero, constant),
+// multiplies the trail RT in place by the blend constant.
+const FADE_WGSL = /* wgsl */`
+@vertex
+fn vs_full(@builtin(vertex_index) vi : u32) -> @builtin(position) vec4<f32> {
+  // Single fullscreen triangle (saves one vertex over a quad).
+  let pos = array<vec2<f32>, 3>(
+    vec2(-1.0, -1.0), vec2( 3.0, -1.0), vec2(-1.0,  3.0),
+  );
+  return vec4(pos[vi], 0.0, 1.0);
+}
+@fragment
+fn fs_fade() -> @location(0) vec4<f32> {
+  // Output value is irrelevant — blend = (zero, constant) ignores src color
+  // and multiplies dst by the per-pass blend constant set on the encoder.
+  return vec4(1.0);
+}
+`;
+
+// T2 composite pass: reads trail RT, applies a cheap bloom + Reinhard tonemap,
+// outputs additively to the canvas (so Three.js scene shows through).
+const COMPOSITE_WGSL = /* wgsl */`
+@group(0) @binding(0) var trail : texture_2d<f32>;
+@group(0) @binding(1) var trailSamp : sampler;
+
+@vertex
+fn vs_full(@builtin(vertex_index) vi : u32) -> @builtin(position) vec4<f32> {
+  let pos = array<vec2<f32>, 3>(
+    vec2(-1.0, -1.0), vec2( 3.0, -1.0), vec2(-1.0,  3.0),
+  );
+  return vec4(pos[vi], 0.0, 1.0);
+}
+
+// Sample thickness (alpha channel of accumulated trail RT).
+fn thickness(uv : vec2<f32>) -> f32 {
+  return textureSampleLevel(trail, trailSamp, uv, 0.0).a;
+}
+
+// Multi-tap box-blurred thickness — smooths individual particle bumps into a
+// cohesive fluid surface. Cheaper than a separable gaussian for this use.
+fn thicknessBlur(uv : vec2<f32>, texel : vec2<f32>) -> f32 {
+  var sum = 0.0;
+  let R = 4.0;
+  // 13-tap symmetric kernel — gives a smooth circular blur footprint.
+  sum += thickness(uv) * 0.20;
+  sum += thickness(uv + vec2( R,  0.0) * texel) * 0.10;
+  sum += thickness(uv + vec2(-R,  0.0) * texel) * 0.10;
+  sum += thickness(uv + vec2( 0.0,  R) * texel) * 0.10;
+  sum += thickness(uv + vec2( 0.0, -R) * texel) * 0.10;
+  sum += thickness(uv + vec2( R,  R) * texel * 0.7) * 0.07;
+  sum += thickness(uv + vec2( R, -R) * texel * 0.7) * 0.07;
+  sum += thickness(uv + vec2(-R,  R) * texel * 0.7) * 0.07;
+  sum += thickness(uv + vec2(-R, -R) * texel * 0.7) * 0.07;
+  sum += thickness(uv + vec2( 2.0*R,  0.0) * texel) * 0.03;
+  sum += thickness(uv + vec2(-2.0*R,  0.0) * texel) * 0.03;
+  sum += thickness(uv + vec2( 0.0,  2.0*R) * texel) * 0.03;
+  sum += thickness(uv + vec2( 0.0, -2.0*R) * texel) * 0.03;
+  return sum;
+}
+
+@fragment
+fn fs_composite(@builtin(position) fragPos : vec4<f32>) -> @location(0) vec4<f32> {
+  let dims = vec2<f32>(textureDimensions(trail, 0));
+  let uv = fragPos.xy / dims;
+  let texel = 1.0 / dims;
+
+  let s = textureSampleLevel(trail, trailSamp, uv, 0.0);
+  let centerRGB = s.rgb;
+
+  // Use the BLURRED thickness so the fluid reads as a smooth surface, not bumps.
+  let centerThick = thicknessBlur(uv, texel);
+
+  if centerThick < 0.04 {
+    // No fluid here — let the scene show through unchanged.
+    discard;
+  }
+
+  // Reconstruct a screen-space normal from blurred thickness gradient.
+  // Wider sample radius → softer, sheet-like surface.
+  let h = 6.0;
+  let tL = thicknessBlur(uv + vec2(-h, 0.0) * texel, texel);
+  let tR = thicknessBlur(uv + vec2( h, 0.0) * texel, texel);
+  let tD = thicknessBlur(uv + vec2(0.0,-h) * texel, texel);
+  let tU = thicknessBlur(uv + vec2(0.0, h) * texel, texel);
+  let dx = (tR - tL);
+  let dy = (tU - tD);
+  // Surface "pokes out" toward camera where thickness is high. Normal slopes
+  // away from regions where neighbors are thicker.
+  let normal = normalize(vec3(-dx * 14.0, -dy * 14.0, 0.7));
+
+  // View vector — assume orthographic looking down -Z. (Good enough for screen-space.)
+  let V = vec3(0.0, 0.0, 1.0);
+  // Key light from upper-left, like an icy interior overhead.
+  let L = normalize(vec3(-0.4, 0.6, 0.8));
+  let H = normalize(L + V);
+
+  // Fresnel: edges of the fluid surface get more reflective/lighter than the body.
+  let NdotV = clamp(dot(normal, V), 0.0, 1.0);
+  let fresnel = pow(1.0 - NdotV, 4.0);
+
+  // Specular highlight — sharp icy glint.
+  let NdotH = clamp(dot(normal, H), 0.0, 1.0);
+  let spec  = pow(NdotH, 90.0) * 1.4;
+
+  // Diffuse — softens the look so the fluid isn't pure highlights.
+  let NdotL = clamp(dot(normal, L) * 0.5 + 0.5, 0.0, 1.0);
+
+  // Body color: cool blue tint deepening with thickness (Beer-Lambert style).
+  let deepCol = vec3(0.06, 0.30, 0.60);
+  let shallowCol = vec3(0.55, 0.85, 1.10);
+  let absorption = exp(-centerThick * 2.5);
+  let bodyCol = mix(deepCol, shallowCol, absorption);
+
+  // Refraction wobble: sample trail at a normal-offset for inner detail.
+  let refractOff = normal.xy * centerThick * 0.04;
+  let inner = textureSampleLevel(trail, trailSamp, uv + refractOff, 0.0).rgb;
+
+  // Compose: refracted inner color × diffuse + fresnel-mixed highlight + specular.
+  let surfaceCol = mix(bodyCol * NdotL, vec3(0.9, 0.97, 1.10), fresnel * 0.85)
+                   + vec3(spec)
+                   + inner * 0.35;
+
+  // Output alpha — translucency grows with thickness; thin edges are barely visible.
+  let alpha = clamp(centerThick * 4.5 + fresnel * 0.4, 0.0, 0.95);
+
+  return vec4(surfaceCol, alpha);
 }
 `;

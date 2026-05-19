@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { WebGPURenderer, MeshStandardNodeMaterial, LineBasicNodeMaterial, MeshBasicNodeMaterial } from 'three/webgpu';
+import { vec3, dot, clamp, mix as tslMix, smoothstep, normalWorld } from 'three/tsl';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TeapotGeometry } from 'three/addons/geometries/TeapotGeometry.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -9,6 +10,7 @@ import { LBM3D } from './sim/lbm3d';
 import { DyeField3D } from './sim/dye3d';
 import { VolumeRenderer } from './render/volume3d';
 import { ParticleSystem } from './render/particles3d';
+import { FluidSurfaceRenderer } from './render/fluidSurface';
 import type { ShapeId } from './sim/voxelize';
 import { voxelizeMesh } from './obstacles/upload';
 import { showToast } from './ui/toast';
@@ -39,6 +41,7 @@ export class App {
   private dye: DyeField3D | null = null;
   private volumeRenderer: VolumeRenderer | null = null;
   private particles: ParticleSystem | null = null;
+  private fluidSurface: FluidSurfaceRenderer | null = null;
   private simStepCount = 0;
   private rafId = 0;
   private running = false;
@@ -132,9 +135,31 @@ export class App {
       this.volumeRenderer = new VolumeRenderer(device, canvasFormat, () => ctx.getCurrentTexture().createView());
       this.volumeRenderer.setTextures(this.lbm.macrosTextureView, this.dye.currentView);
 
-      // GPU particle system: 200k tracer particles for sharp wind-tunnel streamlines.
-      this.particles = new ParticleSystem(device, canvasFormat, () => ctx.getCurrentTexture().createView());
+      // GPU particle system: 140k tracer particles for sharp wind-tunnel streamlines.
+      this.particles = new ParticleSystem(
+        device,
+        canvasFormat,
+        () => ctx.getCurrentTexture().createView(),
+        () => {
+          const t = ctx.getCurrentTexture();
+          return [t.width, t.height];
+        },
+      );
       this.particles.setMacrosTexture(this.lbm.macrosTextureView);
+
+      // Screen-space fluid surface renderer (Splash-style: depth → smooth → normals → fresnel).
+      this.fluidSurface = new FluidSurfaceRenderer(
+        device,
+        canvasFormat,
+        () => ctx.getCurrentTexture().createView(),
+        () => {
+          const t = ctx.getCurrentTexture();
+          return [t.width, t.height];
+        },
+        this.particles.getParticleBuffer(),
+        this.particles.N,
+      );
+      this.fluidSurface.setMacrosTexture(this.lbm.macrosTextureView);
     }
 
     this.wireUI();
@@ -405,13 +430,50 @@ export class App {
     }
   }
 
+  /** Recursively assign a Three.js layer to a Mesh or Group of meshes. */
+  private setMeshLayer(obj: THREE.Object3D, layer: number) {
+    obj.layers.set(layer);
+    if ((obj as THREE.Group).children) {
+      for (const c of obj.children) this.setMeshLayer(c, layer);
+    }
+  }
+
   private makeMat() {
-    return new MeshStandardNodeMaterial({
-      color: 0xe7e9f0,
-      roughness: 0.32,
-      metalness: 0.04,
-      emissive: 0x14141d,
+    // Friction-driven obstacle material.
+    // Tangential shear at a body in flow peaks on the windward face (front
+    // stagnation/shoulder zone) and drops to ~zero on the leeward side. Use
+    // a normal · flow-direction proxy to color each surface fragment:
+    //   front of obstacle (facing +X inlet) → hot red/yellow (high friction)
+    //   shoulders                            → green/cyan (moderate)
+    //   back / wake                          → deep blue (low friction)
+    const flowDir = vec3(1, 0, 0);
+    const frontness = clamp(dot(normalWorld, flowDir), 0, 1);
+
+    // Tuned turbo-style ramp focused on the [0,1] range.
+    const c0 = vec3(0.06, 0.18, 0.55);   // deep blue (back)
+    const c1 = vec3(0.10, 0.85, 0.85);   // cyan
+    const c2 = vec3(0.30, 0.95, 0.30);   // green
+    const c3 = vec3(1.00, 0.85, 0.10);   // yellow
+    const c4 = vec3(1.00, 0.30, 0.10);   // red (front)
+
+    const seg = (t: ReturnType<typeof smoothstep>, a: ReturnType<typeof vec3>, b: ReturnType<typeof vec3>) => tslMix(a, b, t);
+    const t1 = smoothstep(0.00, 0.25, frontness);
+    const t2 = smoothstep(0.25, 0.55, frontness);
+    const t3 = smoothstep(0.55, 0.80, frontness);
+    const t4 = smoothstep(0.80, 1.00, frontness);
+    let col = seg(t1, c0, c1);
+    col = seg(t2, col, c2);
+    col = seg(t3, col, c3);
+    col = seg(t4, col, c4);
+
+    const mat = new MeshStandardNodeMaterial({
+      roughness: 0.42,
+      metalness: 0.08,
     });
+    mat.colorNode = col;
+    // Add a soft glow so the friction map is visible even in shadow.
+    mat.emissiveNode = col.mul(0.35);
+    return mat;
   }
 
   private rebuildObstacle() {
@@ -507,6 +569,13 @@ export class App {
 
     this.obstacleMesh.position.set(x, 0, 0);
     this.scene.add(this.obstacleMesh);
+
+    // Push the obstacle bound to the particle system so particles inside get killed.
+    // For compact shapes use radius r; for elongated shapes use halfLen.
+    const elongated = this.config.shapeId === 'cone' || this.config.shapeId === 'wing' ||
+                      this.config.shapeId === 'f1car' || this.config.shapeId === 'cylinder';
+    const boundR = elongated ? halfLen : r;
+    this.particles?.setObstacle({ x, y: 0, z: 0 }, boundR);
   }
 
   private wireDragDrop() {
@@ -655,10 +724,10 @@ export class App {
       return;
     }
 
-    // GPU particle streamlines — sharp tracer dots advected by the LBM
-    // velocity field. Runs after Three.js so particles composite over the
-    // scene with additive blending.
-    if (this.particles && this.lbm) {
+    // SSFR fluid surface: advect particles via LBM field, then run depth →
+    // blur → thickness → blur → composite to produce a "real water surface"
+    // look. Order: Three.js (cleared) → fluid surface (alpha-over).
+    if (this.lbm && this.particles && this.fluidSurface) {
       this.camera.updateMatrixWorld();
       const view = this.camera.matrixWorldInverse;
       const proj = this.camera.projectionMatrix;
@@ -667,7 +736,12 @@ export class App {
       const aabbMin = new THREE.Vector3(-sx * 0.5, -sy * 0.5, -sz * 0.5);
       const aabbMax = new THREE.Vector3(sx * 0.5, sy * 0.5, sz * 0.5);
       const { W, H, D } = latticeDims(this.config.N);
-      this.particles.step(view, proj, camPos, aabbMin, aabbMax, { W, H, D });
+
+      this.particles.advectOnly(view, proj, camPos, aabbMin, aabbMax, { W, H, D });
+      const sphereSize = sx / 170;                      // smaller individual spheres
+      const t = performance.now() * 0.001;
+      this.fluidSurface.renderRawSpheres(view, proj, sphereSize, t, aabbMin, aabbMax);
+
     }
 
     const now = performance.now();

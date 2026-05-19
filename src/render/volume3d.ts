@@ -63,7 +63,7 @@ struct Uniforms {
   aabbMin        : vec4<f32>,
   aabbMax        : vec4<f32>,
   stepCount      : f32,
-  _pad0          : f32,
+  timeSeed       : f32,
   _pad1          : f32,
   _pad2          : f32,
 }
@@ -77,16 +77,60 @@ struct FragIn {
   @location(0) worldPos  : vec3<f32>,
 }
 
-// Inferno-style ramp: deep blue → magenta → orange → yellow → white
-fn inferno(t : f32) -> vec3<f32> {
+// Turbo ramp: blue → cyan → green → yellow → red. Reads as slow → fast.
+fn turbo(t : f32) -> vec3<f32> {
   let tt = clamp(t, 0.0, 1.0);
-  let c0 = vec3(0.04, 0.05, 0.20);
-  let c1 = vec3(0.55, 0.06, 0.55);
-  let c2 = vec3(1.00, 0.40, 0.30);
-  let c3 = vec3(1.00, 0.92, 0.55);
-  if tt < 0.33 { return mix(c0, c1, tt * 3.0); }
-  if tt < 0.66 { return mix(c1, c2, (tt - 0.33) * 3.0); }
-  return mix(c2, c3, (tt - 0.66) * 3.0);
+  let c0 = vec3(0.19, 0.07, 0.23);
+  let c1 = vec3(0.10, 0.40, 0.95);
+  let c2 = vec3(0.10, 0.85, 0.85);
+  let c3 = vec3(0.30, 0.95, 0.30);
+  let c4 = vec3(0.98, 0.85, 0.10);
+  let c5 = vec3(1.00, 0.25, 0.10);
+  if tt < 0.2 { return mix(c0, c1, tt * 5.0); }
+  if tt < 0.4 { return mix(c1, c2, (tt - 0.2) * 5.0); }
+  if tt < 0.6 { return mix(c2, c3, (tt - 0.4) * 5.0); }
+  if tt < 0.8 { return mix(c3, c4, (tt - 0.6) * 5.0); }
+  return mix(c4, c5, (tt - 0.8) * 5.0);
+}
+
+// Cheap hashed value noise — perturbs ray-march sample coords so the volume
+// looks like granular smoke instead of soft fog.
+fn hash13(p : vec3<f32>) -> f32 {
+  var q = fract(p * 0.1031);
+  q += dot(q, q.zyx + 31.32);
+  return fract((q.x + q.y) * q.z);
+}
+fn vnoise(p : vec3<f32>) -> f32 {
+  let i = floor(p);
+  let f = fract(p);
+  let u3 = f * f * (3.0 - 2.0 * f);
+  let n000 = hash13(i + vec3(0.0, 0.0, 0.0));
+  let n100 = hash13(i + vec3(1.0, 0.0, 0.0));
+  let n010 = hash13(i + vec3(0.0, 1.0, 0.0));
+  let n110 = hash13(i + vec3(1.0, 1.0, 0.0));
+  let n001 = hash13(i + vec3(0.0, 0.0, 1.0));
+  let n101 = hash13(i + vec3(1.0, 0.0, 1.0));
+  let n011 = hash13(i + vec3(0.0, 1.0, 1.0));
+  let n111 = hash13(i + vec3(1.0, 1.0, 1.0));
+  let nx00 = mix(n000, n100, u3.x);
+  let nx10 = mix(n010, n110, u3.x);
+  let nx01 = mix(n001, n101, u3.x);
+  let nx11 = mix(n011, n111, u3.x);
+  let nxy0 = mix(nx00, nx10, u3.y);
+  let nxy1 = mix(nx01, nx11, u3.y);
+  return mix(nxy0, nxy1, u3.z);
+}
+// 3-octave fbm — adds the fine-grained smoke texture.
+fn fbm3(p : vec3<f32>) -> f32 {
+  var s = 0.0;
+  var a = 0.5;
+  var q = p;
+  for (var i = 0; i < 3; i++) {
+    s += a * vnoise(q);
+    q = q * 2.07 + vec3(11.3, 7.7, 19.1);
+    a = a * 0.55;
+  }
+  return s;
 }
 
 // Ray-AABB intersection. Returns vec2(t_near, t_far); t_far < t_near means miss.
@@ -118,37 +162,63 @@ fn fs_main(in : FragIn) -> @location(0) vec4<f32> {
   let nSteps = i32(u.stepCount);
   let stepSize = (tFar - tNear) / f32(nSteps);
 
+  // Jitter ray start by a hash to break banding (essential for low-step counts).
+  let jitter = hash13(in.worldPos * 53.17 + vec3(u.timeSeed * 0.001));
+  let timeT = u.timeSeed * 0.02;
+
   var accumColor = vec3(0.0);
   var transmit   = 1.0;
 
   for (var i = 0; i < nSteps; i++) {
-    let tSample = tNear + (f32(i) + 0.5) * stepSize;
+    let tSample = tNear + (f32(i) + jitter) * stepSize;
     let worldP  = ro + rd * tSample;
-    let uvw     = (worldP - aMin) / aabbSize;
-
+    var uvw     = (worldP - aMin) / aabbSize;
     if any(uvw < vec3(0.0)) || any(uvw > vec3(1.0)) { continue; }
 
-    let macros  = textureSampleLevel(macrosTex, linearSamp, uvw, 0.0);
-    let speed   = length(macros.xyz);
-    let speedN  = clamp(speed / 0.18, 0.0, 1.0);
-    let speedColor = inferno(speedN);
+    // Granular smoke detail: warp sample coords by 2-octave noise + slow time animation.
+    // This breaks the "soft blob" look into wispy filaments.
+    let nFreq = 7.5;
+    let warp = vec3(
+      fbm3(worldP * nFreq + vec3(0.0, 0.0, timeT)),
+      fbm3(worldP * nFreq + vec3(13.1, 7.3, timeT + 19.0)),
+      fbm3(worldP * nFreq + vec3(29.7, 41.2, timeT + 53.0)),
+    ) - 0.5;
+    let warpStrength = 0.012;
+    let uvwWarped = clamp(uvw + warp * warpStrength, vec3(0.0), vec3(1.0));
 
-    let dye = textureSampleLevel(dyeTex, linearSamp, uvw, 0.0);
+    let macros = textureSampleLevel(macrosTex, linearSamp, uvwWarped, 0.0);
+    let speed  = length(macros.xyz);
+    let speedN = clamp(speed / 0.18, 0.0, 1.0);
+
+    // Density proxy: combine dye field + a velocity-magnitude-driven "smoke trail".
+    // Modulate by an fbm field so it looks granular instead of uniform.
+    let dye = textureSampleLevel(dyeTex, linearSamp, uvwWarped, 0.0);
     let dyeIntensity = clamp(length(dye.rgb), 0.0, 1.5);
+    let smokeMask = clamp(fbm3(worldP * 4.0 + vec3(0.0, 0.0, timeT)) * 1.4, 0.0, 1.2);
+    let density = dyeIntensity * 0.95 + speedN * 0.35 * smokeMask;
 
-    // Per-step alpha kept small so dye-filled regions don't occlude the
-    // rest of the volume; total opacity emerges from many small samples.
-    let alpha = clamp(dyeIntensity * 0.08 + speedN * 0.025, 0.0, 0.35);
+    // Henyey-Greenstein-ish forward scatter so smoke catches light from behind.
+    let cosA = dot(rd, normalize(macros.xyz + vec3(1e-4)));
+    let g = 0.45;
+    let phase = (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * cosA, 1.5);
 
-    // Color: dye glows, with a hint of speed-color where the flow is fast.
-    let glow = dye.rgb * 1.5 + speedColor * speedN * 0.6;
-    accumColor += transmit * alpha * glow;
+    // Per-step alpha kept small so dense regions still let light through —
+    // gives that wispy translucent quality instead of an opaque wall.
+    let alpha = clamp(density * 0.045, 0.0, 0.18);
+
+    // Color: dye dominates where present; speed-driven turbo elsewhere.
+    let speedColor = turbo(0.15 + speedN * 0.85);
+    let glow = mix(speedColor * (0.4 + 0.7 * speedN), dye.rgb * 1.6, clamp(dyeIntensity, 0.0, 1.0));
+    let scattered = glow * (0.7 + 0.6 * phase);
+
+    accumColor += transmit * alpha * scattered;
     transmit   *= 1.0 - alpha;
-
     if transmit < 0.02 { break; }
   }
 
-  return vec4(accumColor, 1.0 - transmit);
+  // Reduced overall opacity so volume sits BEHIND particles as ambient smoke.
+  let outA = (1.0 - transmit) * 0.65;
+  return vec4(accumColor, outA);
 }
 `;
 
@@ -268,13 +338,15 @@ export class VolumeRenderer {
     });
   }
 
+  private frame = 0;
+
   render(
     viewMatrix: THREE.Matrix4,
     projMatrix: THREE.Matrix4,
     cameraPos: THREE.Vector3,
     aabbMin: THREE.Vector3,
     aabbMax: THREE.Vector3,
-    stepCount = 32,
+    stepCount = 48,
   ) {
     if (!this.pipeline || !this.bindGroup) return;
 
@@ -290,9 +362,10 @@ export class VolumeRenderer {
     data[36] = aabbMin.x; data[37] = aabbMin.y; data[38] = aabbMin.z; data[39] = 0;
     // aabbMax (offset 40)
     data[40] = aabbMax.x; data[41] = aabbMax.y; data[42] = aabbMax.z; data[43] = 0;
-    // stepCount (offset 44)
+    // stepCount + timeSeed (offset 44, 45)
     data[44] = stepCount;
-    data[45] = 0; data[46] = 0; data[47] = 0;
+    data[45] = this.frame++;
+    data[46] = 0; data[47] = 0;
 
     this.device.queue.writeBuffer(this.uniformBuf, 0, data.buffer);
 
