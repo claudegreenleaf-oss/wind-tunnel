@@ -937,9 +937,12 @@ export class App {
       const aabbMax = new THREE.Vector3(sx * 0.5, sy * 0.5, sz * 0.5);
       const { W, H, D } = latticeDims(this.config.N);
 
-      // Pause gates the whole sim — particles included.
+      // Pause gates the whole sim — particles included. Scale particle dt
+      // by simSpeed so slo-mo / the sim-speed slider also visually slow
+      // (or speed up) the particle motion, not just the underlying LBM.
       if (!this.config.paused) {
-        this.particles.advectOnly(view, proj, camPos, aabbMin, aabbMax, { W, H, D });
+        const dt = 6.0 * this.config.simSpeed;
+        this.particles.advectOnly(view, proj, camPos, aabbMin, aabbMax, { W, H, D }, { dt });
       }
       const sphereSize = sx / 170;                      // smaller individual spheres
       const t = performance.now() * 0.001;
