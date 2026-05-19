@@ -6,6 +6,7 @@ import { TeapotGeometry } from 'three/addons/geometries/TeapotGeometry.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { voxelizeAnyMesh } from './obstacles/voxelizeAnyMesh';
 import { defaultConfig, latticeDims, computeRe } from './config';
 import { LBM3D } from './sim/lbm3d';
 import { DyeField3D } from './sim/dye3d';
@@ -186,6 +187,11 @@ export class App {
       this.sliceIndicator = new THREE.Mesh(sliceGeom, sliceMat);
       this.sliceIndicator.visible = false;
       this.scene.add(this.sliceIndicator);
+
+      // Now that fluidSurface + LBM are live, push the initial obstacle through
+      // the unified collision pipeline (Three.js mesh → voxelized LBM mask →
+      // GPU obstacle render). This makes the initial sphere match exactly.
+      this.rebuildObstacle();
     }
 
     this.wireUI();
@@ -274,8 +280,10 @@ export class App {
     shapeSelect.addEventListener('change', () => {
       const id = shapeSelect.value as ShapeId;
       this.config.shapeId = id;
+      // rebuildObstacle now ALSO voxelizes the mesh into the LBM mask, so the
+      // physics + render geometry are guaranteed to match. No separate
+      // parametric setShape call needed.
       this.rebuildObstacle();
-      if (this.lbm) this.lbm.setShape(id);
     });
 
     q<HTMLButtonElement>('#btn-reset').addEventListener('click', () => {
@@ -743,6 +751,18 @@ export class App {
     }
     const indices = idxAttr ? new Uint32Array(idxAttr.array as ArrayLike<number>) : null;
     this.fluidSurface.setObstacleGeometry(inter, indices);
+
+    // UNIFIED COLLISION: voxelize the exact same merged geometry into the LBM
+    // solid mask. Mesh ↔ physics are now derived from a single source, so any
+    // shape — including the teapot — always agrees between render and sim.
+    if (this.lbm) {
+      const { sx, sy, sz } = this.latticeWorld();
+      const aabbMin = new THREE.Vector3(-sx * 0.5, -sy * 0.5, -sz * 0.5);
+      const aabbSize = new THREE.Vector3(sx, sy, sz);
+      const { W, H, D } = latticeDims(this.config.N);
+      const mask = voxelizeAnyMesh(merged, { W, H, D }, aabbMin, aabbSize);
+      this.lbm.setMaskBuffer(mask);
+    }
 
     // Free the clones.
     for (const g of collected) g.dispose();
