@@ -264,7 +264,10 @@ export class App {
     dyeSlider.addEventListener('input', () => {
       this.config.dyeAmount = parseFloat(dyeSlider.value);
       dyeVal.textContent = this.config.dyeAmount.toFixed(2);
+      if (this.dye) this.dye.injectAmount = this.config.dyeAmount;
     });
+    // Push initial value once at startup.
+    if (this.dye) this.dye.injectAmount = this.config.dyeAmount;
 
     const speedMul = q<HTMLInputElement>('#sl-speed-mul');
     const speedMulVal = q<HTMLSpanElement>('#val-speed-mul');
@@ -370,7 +373,7 @@ export class App {
     mrtBtn.addEventListener('click', () => {
       this.config.useMRT = !this.config.useMRT;
       if (this.lbm) this.lbm.useMRT = this.config.useMRT ? 1 : 0;
-      mrtBtn.textContent = this.config.useMRT ? 'Collision: MRT' : 'Collision: BGK';
+      mrtBtn.textContent = this.config.useMRT ? 'Collision: TRT' : 'Collision: BGK';
       mrtBtn.classList.toggle('active', this.config.useMRT);
     });
 
@@ -467,11 +470,24 @@ export class App {
   }
 
   private applyResolution() {
-    if (!this.lbm) return;
+    if (!this.lbm || !this._gpuDevice) return;
     const { W, H, D } = latticeDims(this.config.N);
     this.lbm.resize(W, H, D);
-    this.lbm.setShape(this.config.shapeId as ShapeId);
+    // LBM resize destroys + reallocates its macros texture and mask buffer.
+    // Rebuild the dye field at the new dims, then rebind all downstream
+    // renderers to the fresh LBM textures.
+    if (this.dye) {
+      this.dye.dispose?.();
+    }
+    this.dye = new DyeField3D(this._gpuDevice, W, H, D, () => this.lbm!.macrosTextureView);
+    this.dye.injectAmount = this.config.dyeAmount;
+    this.volumeRenderer?.setTextures(this.lbm.macrosTextureView, this.dye.currentView);
+    this.particles?.setMacrosTexture(this.lbm.macrosTextureView);
+    this.fluidSurface?.setMacrosTexture(this.lbm.macrosTextureView);
+    this.fluidSurface?.setMaskBuffer(this.lbm.maskBuffer, { W, H, D });
+    this.sliceViewer?.setMacros(this.lbm.macrosTextureView);
     this.rebuildLatticeBox();
+    // rebuildObstacle re-voxelizes into the new mask + repushes geometry.
     this.rebuildObstacle();
     this.simStepCount = 0;
     this.refreshReHud();
@@ -753,15 +769,20 @@ export class App {
     this.fluidSurface.setObstacleGeometry(inter, indices);
 
     // UNIFIED COLLISION: voxelize the exact same merged geometry into the LBM
-    // solid mask. Mesh ↔ physics are now derived from a single source, so any
-    // shape — including the teapot — always agrees between render and sim.
+    // solid mask. The merged geometry is in OBSTACLE-LOCAL coords (which is
+    // what the GPU obstacle pipeline expects — it applies the obstacle's
+    // modelMatrix in the vertex shader). For voxelization we need WORLD
+    // coords, so clone and bake the obstacle's world matrix in.
     if (this.lbm) {
+      const worldGeom = merged.clone();
+      worldGeom.applyMatrix4(this.obstacleMesh.matrixWorld);
       const { sx, sy, sz } = this.latticeWorld();
       const aabbMin = new THREE.Vector3(-sx * 0.5, -sy * 0.5, -sz * 0.5);
       const aabbSize = new THREE.Vector3(sx, sy, sz);
       const { W, H, D } = latticeDims(this.config.N);
-      const mask = voxelizeAnyMesh(merged, { W, H, D }, aabbMin, aabbSize);
+      const mask = voxelizeAnyMesh(worldGeom, { W, H, D }, aabbMin, aabbSize);
       this.lbm.setMaskBuffer(mask);
+      worldGeom.dispose();
     }
 
     // Free the clones.
@@ -928,7 +949,10 @@ export class App {
       const aabbMax = new THREE.Vector3(sx * 0.5, sy * 0.5, sz * 0.5);
       const { W, H, D } = latticeDims(this.config.N);
 
-      this.particles.advectOnly(view, proj, camPos, aabbMin, aabbMax, { W, H, D });
+      // Pause gates the whole sim — particles included.
+      if (!this.config.paused) {
+        this.particles.advectOnly(view, proj, camPos, aabbMin, aabbMax, { W, H, D });
+      }
       const sphereSize = sx / 170;                      // smaller individual spheres
       const t = performance.now() * 0.001;
 
@@ -988,7 +1012,7 @@ export class App {
     if (!device) return;
 
     const radius = Math.max(3, Math.round(this.lbm.H * 0.06));
-    const strength = 0.04;
+    const strength = 0.20;                              // bigger pulse — visible drag effect
     const typeVal = this._injectMode === 'impulse' ? 1 : 0;
 
     const rawBuf = new ArrayBuffer(48);
