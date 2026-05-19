@@ -309,6 +309,16 @@ export class App {
     // Orientation + scale sliders. Each one re-applies the obstacle transform
     // (rotation+scale) and re-voxelizes so the LBM mask stays in sync. We
     // debounce the voxelize step so dragging the slider is responsive.
+    const xfracSlider = q<HTMLInputElement>('#sl-xfrac');
+    const xfracVal = q<HTMLSpanElement>('#val-xfrac');
+    xfracSlider.value = String(this.config.obstacleXFrac);
+    xfracVal.textContent = `${Math.round(this.config.obstacleXFrac * 100)}%`;
+    xfracSlider.addEventListener('input', () => {
+      this.config.obstacleXFrac = parseFloat(xfracSlider.value);
+      xfracVal.textContent = `${Math.round(this.config.obstacleXFrac * 100)}%`;
+      this.applyObstacleTransform();
+    });
+
     const scaleSlider = q<HTMLInputElement>('#sl-scale');
     const scaleVal = q<HTMLSpanElement>('#val-scale');
     const yawSlider = q<HTMLInputElement>('#sl-yaw');
@@ -709,6 +719,10 @@ export class App {
     if (!this.obstacleMesh) return;
     const m = this.obstacleMesh;
     const deg2rad = (d: number) => (d * Math.PI) / 180;
+    // Position: slide the obstacle along the flow axis. xFrac ∈ (0,1) maps
+    // 0 → inlet, 1 → outlet (linear in lattice width).
+    const { sx } = this.latticeWorld();
+    m.position.set(-sx * 0.5 + sx * this.config.obstacleXFrac, 0, 0);
     // Three.js applies rotations in order X → Y → Z by default. We want yaw
     // (Y) around the vertical, pitch (Z) around the side axis, roll (X) along
     // the flow — so we order the Euler set so the resulting rotation matches
@@ -741,7 +755,7 @@ export class App {
       this.obstacleMesh = null;
     }
     const { sx, sy } = this.latticeWorld();
-    const x = -sx * 0.5 + sx * 0.3;
+    const x = -sx * 0.5 + sx * this.config.obstacleXFrac;
     const r = sy * 0.18;
     const halfLen = sy * 0.42;
 
@@ -1040,7 +1054,7 @@ export class App {
         }
         const { sx } = this.latticeWorld();
         const uploadMesh = new THREE.Mesh(geometry, this.makeMat());
-        uploadMesh.position.set(-sx * 0.5 + sx * 0.3, 0, 0);
+        uploadMesh.position.set(-sx * 0.5 + sx * this.config.obstacleXFrac, 0, 0);
         this.obstacleMesh = uploadMesh;
         this.scene.add(this.obstacleMesh);
 

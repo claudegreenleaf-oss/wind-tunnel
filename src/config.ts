@@ -26,6 +26,7 @@ export interface SimConfig {
   pitchDeg: number;   // rotation around side (Z) axis
   rollDeg: number;    // rotation around flow (X) axis
   scaleMul: number;   // 1 = registry default size
+  obstacleXFrac: number;  // 0 = at inlet, 1 = at outlet; default 0.3
   // Visualization
   dyeAmount: number;
   // Time
@@ -48,6 +49,7 @@ export function defaultConfig(): SimConfig {
     pitchDeg: 0,
     rollDeg: 0,
     scaleMul: 1,
+    obstacleXFrac: 0.3,
     dyeAmount: 1.0,
     paused: false,
     simSpeed: 1.0,
