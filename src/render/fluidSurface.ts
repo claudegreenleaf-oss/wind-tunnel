@@ -58,6 +58,18 @@ export class FluidSurfaceRenderer {
   private directSphereBG: GPUBindGroup | null = null;
   private directDepthTex: GPUTexture | null = null;
 
+  // Obstacle mesh — drawn in our pipeline so it shares the depth-stencil with
+  // the particles, giving correct occlusion regardless of camera angle.
+  private obstaclePipeline!: GPURenderPipeline;
+  private obstacleBgl!: GPUBindGroupLayout;
+  private obstacleBG: GPUBindGroup | null = null;
+  private obstacleUniformBuf: GPUBuffer;
+  private obstacleVtxBuf: GPUBuffer | null = null;
+  private obstacleIdxBuf: GPUBuffer | null = null;
+  private obstacleVertCount = 0;
+  private obstacleIdxCount = 0;
+  private obstacleIdxFormat: GPUIndexFormat = 'uint32';
+
   // Bind-group layouts
   private depthBgl!: GPUBindGroupLayout;
   private depthBlurBgl!: GPUBindGroupLayout;
@@ -114,6 +126,12 @@ export class FluidSurfaceRenderer {
     //   total: 368 bytes
     this.uniformBuf = device.createBuffer({
       size: 368,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Obstacle uniforms: viewMat(64) + projMat(64) + modelMat(64) + upstream(16) = 208
+    this.obstacleUniformBuf = device.createBuffer({
+      size: 208,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -271,6 +289,44 @@ export class FluidSurfaceRenderer {
         }],
       },
       primitive: { topology: 'triangle-list' },
+    });
+
+    // Obstacle pipeline — draws the actual mesh into the same color + depth
+    // attachments as particles, so depth occlusion is correct.
+    this.obstacleBgl = dev.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      ],
+    });
+    const obstacleMod = dev.createShaderModule({ code: OBSTACLE_WGSL, label: 'fluid-obstacle' });
+    this.obstaclePipeline = dev.createRenderPipeline({
+      label: 'fluid-obstacle',
+      layout: dev.createPipelineLayout({ bindGroupLayouts: [this.obstacleBgl] }),
+      vertex: {
+        module: obstacleMod, entryPoint: 'vs_obstacle',
+        buffers: [
+          {
+            // Interleaved: position(3) + normal(3) = 6 floats = 24 bytes
+            arrayStride: 24,
+            attributes: [
+              { shaderLocation: 0, offset: 0,  format: 'float32x3' },   // position
+              { shaderLocation: 1, offset: 12, format: 'float32x3' },   // normal
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: obstacleMod, entryPoint: 'fs_obstacle',
+        targets: [{ format: this.canvasFormat }],
+      },
+      primitive: { topology: 'triangle-list', cullMode: 'back' },
+      depthStencil: {
+        format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less',
+      },
+    });
+    this.obstacleBG = dev.createBindGroup({
+      layout: this.obstacleBgl,
+      entries: [{ binding: 0, resource: { buffer: this.obstacleUniformBuf } }],
     });
 
     // Direct sphere pipeline — opaque colored impostor spheres, depth-tested,
@@ -581,6 +637,35 @@ export class FluidSurfaceRenderer {
   }
 
   /**
+   * Upload obstacle mesh geometry to GPU. The mesh is then drawn in our
+   * render pass before the particles, so depth-occlusion works for ALL shapes.
+   * Pass interleaved position+normal floats (6 floats per vertex) and indices.
+   */
+  setObstacleGeometry(interleaved: Float32Array, indices: Uint16Array | Uint32Array | null) {
+    this.obstacleVtxBuf?.destroy();
+    this.obstacleIdxBuf?.destroy();
+    this.obstacleVtxBuf = this.device.createBuffer({
+      size: interleaved.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(this.obstacleVtxBuf, 0, interleaved.buffer, interleaved.byteOffset, interleaved.byteLength);
+    this.obstacleVertCount = interleaved.length / 6;
+
+    if (indices) {
+      this.obstacleIdxFormat = indices.BYTES_PER_ELEMENT === 2 ? 'uint16' : 'uint32';
+      this.obstacleIdxBuf = this.device.createBuffer({
+        size: Math.max(indices.byteLength, 4),
+        usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+      });
+      this.device.queue.writeBuffer(this.obstacleIdxBuf, 0, indices.buffer, indices.byteOffset, indices.byteLength);
+      this.obstacleIdxCount = indices.length;
+    } else {
+      this.obstacleIdxBuf = null;
+      this.obstacleIdxCount = 0;
+    }
+  }
+
+  /**
    * Render particles as colored opaque impostor spheres straight to canvas.
    * No SSFR filter — each particle is an individual lit sphere.
    */
@@ -648,14 +733,39 @@ export class FluidSurfaceRenderer {
     this.device.queue.writeBuffer(this.uniformBuf, 0, buf.buffer);
 
     const enc = this.device.createCommandEncoder({ label: 'direct-spheres' });
+    const canvasView = this.getCanvasView();
+    const depthView = this.directDepthTex!.createView();
+
+    // 1) Draw the obstacle (if uploaded), establishing color + depth.
+    if (this.obstacleVtxBuf && this.obstacleVertCount > 0) {
+      const rpO = enc.beginRenderPass({
+        colorAttachments: [{ view: canvasView, loadOp: 'load', storeOp: 'store' }],
+        depthStencilAttachment: {
+          view: depthView,
+          depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store',
+        },
+      });
+      rpO.setPipeline(this.obstaclePipeline);
+      rpO.setBindGroup(0, this.obstacleBG!);
+      rpO.setVertexBuffer(0, this.obstacleVtxBuf);
+      if (this.obstacleIdxBuf && this.obstacleIdxCount > 0) {
+        rpO.setIndexBuffer(this.obstacleIdxBuf, this.obstacleIdxFormat);
+        rpO.drawIndexed(this.obstacleIdxCount);
+      } else {
+        rpO.draw(this.obstacleVertCount);
+      }
+      rpO.end();
+    }
+
+    // 2) Draw particles, LOADING the obstacle depth so particles behind the
+    //    obstacle get depth-culled.
     const rp = enc.beginRenderPass({
-      colorAttachments: [{
-        view: this.getCanvasView(),
-        loadOp: 'load', storeOp: 'store',
-      }],
+      colorAttachments: [{ view: canvasView, loadOp: 'load', storeOp: 'store' }],
       depthStencilAttachment: {
-        view: this.directDepthTex!.createView(),
-        depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store',
+        view: depthView,
+        depthLoadOp: this.obstacleVtxBuf ? 'load' : 'clear',
+        depthClearValue: 1.0,
+        depthStoreOp: 'store',
       },
     });
     rp.setPipeline(this.directSpherePipeline);
@@ -663,6 +773,16 @@ export class FluidSurfaceRenderer {
     rp.draw(6, this.N);
     rp.end();
     this.device.queue.submit([enc.finish()]);
+  }
+
+  /** Push view/proj/model matrices + upstream dir into the obstacle uniform. */
+  setObstacleTransform(view: THREE.Matrix4, proj: THREE.Matrix4, model: THREE.Matrix4) {
+    const buf = new Float32Array(52);
+    buf.set(view.elements, 0);
+    buf.set(proj.elements, 16);
+    buf.set(model.elements, 32);
+    buf[48] = -1; buf[49] = 0; buf[50] = 0; buf[51] = 0;   // upstream direction
+    this.device.queue.writeBuffer(this.obstacleUniformBuf, 0, buf.buffer);
   }
 
   dispose() {
@@ -1196,5 +1316,60 @@ fn fs_direct(@location(0) uv : vec2f, @location(1) viewPos : vec3f, @location(2)
   out.color = vec4f(shaded, 1.0);
   out.fragDepth = fragDepth;
   return out;
+}
+`;
+
+// Obstacle pipeline: draws the actual mesh into the same color + depth
+// attachments as the particles, so depth occlusion is correct for ALL shapes.
+// Fragment shader colors each surface fragment by friction proxy
+// (dot(normal, upstream)) through a turbo ramp.
+const OBSTACLE_WGSL = /* wgsl */`
+struct ObstacleUniforms {
+  viewMat   : mat4x4f,
+  projMat   : mat4x4f,
+  modelMat  : mat4x4f,
+  upstream  : vec4f,    // direction the wind comes FROM (-X by default)
+};
+@group(0) @binding(0) var<uniform> u : ObstacleUniforms;
+
+struct VOut {
+  @builtin(position) clip : vec4f,
+  @location(0) normalWorld : vec3f,
+};
+
+@vertex
+fn vs_obstacle(@location(0) pos : vec3f, @location(1) norm : vec3f) -> VOut {
+  let worldPos = (u.modelMat * vec4f(pos, 1.0)).xyz;
+  let viewPos  = (u.viewMat  * vec4f(worldPos, 1.0)).xyz;
+  let nWorld   = normalize((u.modelMat * vec4f(norm, 0.0)).xyz);
+  var out : VOut;
+  out.clip = u.projMat * vec4f(viewPos, 1.0);
+  out.normalWorld = nWorld;
+  return out;
+}
+
+fn turbo5(t : f32) -> vec3f {
+  let tt = clamp(t, 0.0, 1.0);
+  let c0 = vec3f(0.06, 0.18, 0.55);   // deep blue (back)
+  let c1 = vec3f(0.10, 0.85, 0.85);   // cyan
+  let c2 = vec3f(0.30, 0.95, 0.30);   // green
+  let c3 = vec3f(1.00, 0.85, 0.10);   // yellow
+  let c4 = vec3f(1.00, 0.30, 0.10);   // red (front)
+  if tt < 0.25 { return mix(c0, c1, tt * 4.0); }
+  if tt < 0.55 { return mix(c1, c2, (tt - 0.25) * 3.333); }
+  if tt < 0.80 { return mix(c2, c3, (tt - 0.55) * 4.0); }
+  return mix(c3, c4, (tt - 0.80) * 5.0);
+}
+
+@fragment
+fn fs_obstacle(@location(0) n : vec3f) -> @location(0) vec4f {
+  let nw = normalize(n);
+  let frontness = clamp(dot(nw, u.upstream.xyz), 0.0, 1.0);
+  var col = turbo5(frontness);
+  // Soft Lambert lighting for shape readability.
+  let lightDir = normalize(vec3f(-0.4, 0.85, 0.7));
+  let ndotl = clamp(dot(nw, lightDir), 0.0, 1.0);
+  col = col * (0.55 + 0.55 * ndotl) + vec3f(0.06);
+  return vec4f(col, 1.0);
 }
 `;

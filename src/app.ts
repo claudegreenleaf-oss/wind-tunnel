@@ -5,6 +5,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TeapotGeometry } from 'three/addons/geometries/TeapotGeometry.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { defaultConfig, latticeDims, computeRe } from './config';
 import { LBM3D } from './sim/lbm3d';
 import { DyeField3D } from './sim/dye3d';
@@ -609,7 +610,9 @@ export class App {
       case 'cone': {
         const geom = new THREE.ConeGeometry(r, 2 * halfLen, 32);
         const mesh = new THREE.Mesh(geom, this.makeMat());
-        mesh.rotation.z = -Math.PI / 2;
+        // Apex points into the wind (-X), base trails downstream (+X) —
+        // matches the voxelize convention.
+        mesh.rotation.z = Math.PI / 2;
         this.obstacleMesh = mesh;
         break;
       }
@@ -691,6 +694,59 @@ export class App {
     this.particles?.setObstacle({ x, y: 0, z: 0 }, boundR);
     this.fluidSurface?.setObstacle({ x, y: 0, z: 0 }, boundR);
     this.particles?.resetAllParticles();
+
+    // Extract the obstacle's geometry into our WebGPU pipeline so it shares
+    // the depth buffer with the particles → proper depth occlusion from any
+    // camera angle for ANY shape. Hide the Three.js mesh to avoid drawing twice.
+    this.uploadObstacleToFluidSurface();
+    this.obstacleMesh.visible = false;
+  }
+
+  /** Merge all meshes under obstacleMesh into a single interleaved buffer + indices. */
+  private uploadObstacleToFluidSurface() {
+    if (!this.obstacleMesh || !this.fluidSurface) return;
+
+    // Collect geometries (in obstacle-local coords, BAKED with each child's transform
+    // so the group's children align correctly when drawn in our pipeline).
+    const collected: THREE.BufferGeometry[] = [];
+    this.obstacleMesh.updateMatrixWorld(true);
+    this.obstacleMesh.traverse((obj) => {
+      const m = obj as THREE.Mesh;
+      if (!m.isMesh || !m.geometry) return;
+      const g = m.geometry.clone();
+      g.computeVertexNormals();
+      // Bake child's local transform relative to the obstacle root into the geometry,
+      // so all children share the same coordinate space.
+      const local = new THREE.Matrix4().copy(m.matrixWorld).premultiply(
+        new THREE.Matrix4().copy(this.obstacleMesh!.matrixWorld).invert(),
+      );
+      g.applyMatrix4(local);
+      collected.push(g);
+    });
+
+    if (collected.length === 0) return;
+    const merged = collected.length === 1 ? collected[0] : mergeGeometries(collected, false);
+    if (!merged) return;
+
+    const posAttr = merged.attributes.position;
+    const normAttr = merged.attributes.normal;
+    const idxAttr = merged.index;
+    const vCount = posAttr.count;
+    const inter = new Float32Array(vCount * 6);
+    for (let i = 0; i < vCount; i++) {
+      inter[i * 6 + 0] = posAttr.getX(i);
+      inter[i * 6 + 1] = posAttr.getY(i);
+      inter[i * 6 + 2] = posAttr.getZ(i);
+      inter[i * 6 + 3] = normAttr.getX(i);
+      inter[i * 6 + 4] = normAttr.getY(i);
+      inter[i * 6 + 5] = normAttr.getZ(i);
+    }
+    const indices = idxAttr ? new Uint32Array(idxAttr.array as ArrayLike<number>) : null;
+    this.fluidSurface.setObstacleGeometry(inter, indices);
+
+    // Free the clones.
+    for (const g of collected) g.dispose();
+    if (collected.length > 1 && merged !== collected[0]) merged.dispose();
   }
 
   private wireDragDrop() {
@@ -855,6 +911,14 @@ export class App {
       this.particles.advectOnly(view, proj, camPos, aabbMin, aabbMax, { W, H, D });
       const sphereSize = sx / 170;                      // smaller individual spheres
       const t = performance.now() * 0.001;
+
+      // Push the obstacle's current world matrix to the obstacle pipeline so
+      // the mesh draws at the right place.
+      if (this.obstacleMesh) {
+        this.obstacleMesh.updateMatrixWorld();
+        this.fluidSurface.setObstacleTransform(view, proj, this.obstacleMesh.matrixWorld);
+      }
+
       this.fluidSurface.renderRawSpheres(view, proj, sphereSize, t, aabbMin, aabbMax);
 
       // Picture-in-picture slice viewer.
