@@ -7,6 +7,8 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { voxelizeAnyMesh } from './obstacles/voxelizeAnyMesh';
+import { REMOTE_MODELS, getRemoteModel, type RemoteModel } from './obstacles/modelRegistry';
+import { loadRemoteModel } from './obstacles/loadRemote';
 import { defaultConfig, latticeDims, computeRe } from './config';
 import { LBM3D } from './sim/lbm3d';
 import { DyeField3D } from './sim/dye3d';
@@ -127,7 +129,12 @@ export class App {
       this.lbm.visc = this.config.visc;
       this.lbm.aoaRad = (this.config.aoaDeg * Math.PI) / 180;
       this.lbm.gravity = this.config.gravity;
-      this.lbm.setShape(this.config.shapeId as ShapeId);
+      // Only the parametric primitives have an LBM-side voxelizer; remote
+      // models flow through rebuildObstacle → uploadObstacleToFluidSurface.
+      const BUILTINS: ReadonlySet<string> = new Set(['sphere', 'cylinder', 'cone', 'wing', 'teapot']);
+      if (BUILTINS.has(this.config.shapeId)) {
+        this.lbm.setShape(this.config.shapeId as ShapeId);
+      }
 
       // Phase 3: 3D dye field
       this.dye = new DyeField3D(device, W, H, D, () => this.lbm!.macrosTextureView);
@@ -267,13 +274,19 @@ export class App {
     });
 
     const shapeSelect = q<HTMLSelectElement>('#shape-select');
+    const remoteGroup = q<HTMLOptGroupElement>('#shape-remote-group');
+    for (const m of REMOTE_MODELS) {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.name;
+      remoteGroup.appendChild(opt);
+    }
     shapeSelect.value = this.config.shapeId;
     shapeSelect.addEventListener('change', () => {
-      const id = shapeSelect.value as ShapeId;
-      this.config.shapeId = id;
-      // rebuildObstacle now ALSO voxelizes the mesh into the LBM mask, so the
-      // physics + render geometry are guaranteed to match. No separate
-      // parametric setShape call needed.
+      this.config.shapeId = shapeSelect.value;
+      // rebuildObstacle handles both built-in primitives and remote .glb
+      // models. For remotes, a placeholder sphere is swapped in until the
+      // fetch resolves.
       this.rebuildObstacle();
     });
 
@@ -658,39 +671,24 @@ export class App {
         this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
         break;
       }
-      case 'f1car': {
-        const group = new THREE.Group();
-        // Main hull: scaled sphere
-        const hullGeom = new THREE.SphereGeometry(r, 32, 16);
-        const hull = new THREE.Mesh(hullGeom, this.makeMat());
-        hull.scale.set(1.0, 0.4, 0.7);
-        group.add(hull);
-        // 4 wheels
-        const wr = r * 0.2;
-        const wh = r * 0.15;
-        const wx = r * 0.6;
-        const wz = r * 0.6;
-        const wheelPositions: [number, number, number][] = [
-          [wx, 0, wz], [wx, 0, -wz], [-wx, 0, wz], [-wx, 0, -wz],
-        ];
-        for (const [wPx, wPy, wPz] of wheelPositions) {
-          const wGeom = new THREE.CylinderGeometry(wr, wr, wh * 2, 16);
-          const wheel = new THREE.Mesh(wGeom, this.makeMat());
-          wheel.position.set(wPx, wPy, wPz);
-          group.add(wheel);
-        }
-        this.obstacleMesh = group;
-        break;
-      }
-      case 'helmet': {
+      case 'sphere': {
         const geom = new THREE.SphereGeometry(r, 48, 32);
         this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
         break;
       }
-      case 'sphere':
       default: {
-        const geom = new THREE.SphereGeometry(r, 48, 32);
-        this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
+        // Anything not a built-in shape is treated as a remote model id.
+        // Start it as a placeholder sphere so the scene has something while
+        // the .glb fetch is in flight, then swap once the geometry resolves.
+        const model = getRemoteModel(this.config.shapeId);
+        if (!model) {
+          const geom = new THREE.SphereGeometry(r, 48, 32);
+          this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
+        } else {
+          const placeholder = new THREE.Mesh(new THREE.SphereGeometry(r * 0.5, 16, 8), this.makeMat());
+          this.obstacleMesh = placeholder;
+          this.kickRemoteModelLoad(model, r, halfLen);
+        }
         break;
       }
     }
@@ -700,8 +698,9 @@ export class App {
 
     // Update the obstacle bound, then WIPE all particles (per user spec —
     // changing shape should clear the scene and let the new flow develop).
+    const remoteElongated = getRemoteModel(this.config.shapeId)?.elongated === true;
     const elongated = this.config.shapeId === 'cone' || this.config.shapeId === 'wing' ||
-                      this.config.shapeId === 'f1car' || this.config.shapeId === 'cylinder';
+                      this.config.shapeId === 'cylinder' || remoteElongated;
     const boundR = elongated ? halfLen : r;
     this.particles?.setObstacle({ x, y: 0, z: 0 }, boundR);
     this.fluidSurface?.setObstacle({ x, y: 0, z: 0 }, boundR);
@@ -712,6 +711,51 @@ export class App {
     // camera angle for ANY shape. Hide the Three.js mesh to avoid drawing twice.
     this.uploadObstacleToFluidSurface();
     this.obstacleMesh.visible = false;
+  }
+
+  /**
+   * Kick off a remote .glb fetch for `model`, then swap the placeholder
+   * obstacle for the real geometry when it lands. If the user changes shape
+   * mid-fetch, the result is discarded so we don't overwrite a newer choice.
+   */
+  private kickRemoteModelLoad(model: RemoteModel, r: number, halfLen: number) {
+    const target = model.id;
+    showToast(`Loading ${model.name} (~${(model.sizeKB / 1024).toFixed(1)} MB)…`);
+    loadRemoteModel(model.url).then((geom) => {
+      // Bail out if the user picked something else while we were fetching.
+      if (this.config.shapeId !== target) return;
+
+      // Scale: longest side maps to ~1.1 * halfLen — leaves headroom on
+      // every side for flow to develop. (Tighter than the cylinder/cone
+      // defaults because real-mesh bboxes are looser than their visible silhouette.)
+      const targetSize = halfLen * 1.1;
+      geom.applyMatrix4(new THREE.Matrix4().makeScale(targetSize, targetSize, targetSize));
+      if (model.yawRad) {
+        geom.applyMatrix4(new THREE.Matrix4().makeRotationY(model.yawRad));
+      }
+      geom.computeVertexNormals();
+
+      // Replace the placeholder with the real mesh in place.
+      if (this.obstacleMesh) {
+        const x = this.obstacleMesh.position.x;
+        this.scene.remove(this.obstacleMesh);
+        this.disposeMeshOrGroup(this.obstacleMesh);
+        const mesh = new THREE.Mesh(geom, this.makeMat());
+        mesh.position.set(x, 0, 0);
+        this.obstacleMesh = mesh;
+        this.scene.add(this.obstacleMesh);
+        this.uploadObstacleToFluidSurface();
+        this.particles?.resetAllParticles();
+        this.obstacleMesh.visible = false;
+      }
+      showToast(`${model.name} loaded`);
+      // Note: r is captured for parity with built-ins but the merged mesh
+      // already came pre-centered + unit-normalised so `r` isn't used here.
+      void r;
+    }).catch((err) => {
+      console.warn('remote model load failed', err);
+      showToast(`Failed to load ${model.name}`);
+    });
   }
 
   /** Merge all meshes under obstacleMesh into a single interleaved buffer + indices. */

@@ -32,13 +32,15 @@
           <h2>Shape</h2>
           <div class="group-body">
             <select id="shape-select">
-              <option value="sphere">Sphere</option>
-              <option value="cylinder">Cylinder</option>
-              <option value="cone">Cone</option>
-              <option value="wing">Wing (NACA 0012)</option>
-              <option value="teapot">Teapot</option>
-              <option value="f1car">F1 Car</option>
-              <option value="helmet">Helmet</option>
+              <optgroup label="Primitives">
+                <option value="sphere">Sphere</option>
+                <option value="cylinder">Cylinder</option>
+                <option value="cone">Cone</option>
+                <option value="wing">Wing (NACA 0012)</option>
+                <option value="teapot">Teapot</option>
+              </optgroup>
+              <!-- Remote .glb models are injected here at runtime from modelRegistry.ts -->
+              <optgroup label="Models" id="shape-remote-group"></optgroup>
               <option value="custom" disabled>Custom (uploaded)</option>
             </select>
             <div class="row">
