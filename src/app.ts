@@ -16,6 +16,7 @@ import { VolumeRenderer } from './render/volume3d';
 import { ParticleSystem } from './render/particles3d';
 import { FluidSurfaceRenderer } from './render/fluidSurface';
 import { SliceViewer, type SliceAxis, type SliceField } from './render/sliceViewer';
+import { DragCoeffCalc } from './sim/dragCoeff';
 import type { ShapeId } from './sim/voxelize';
 import { voxelizeMesh } from './obstacles/upload';
 import { showToast } from './ui/toast';
@@ -48,6 +49,9 @@ export class App {
   private particles: ParticleSystem | null = null;
   private fluidSurface: FluidSurfaceRenderer | null = null;
   private sliceViewer: SliceViewer | null = null;
+  private dragCalc: DragCoeffCalc | null = null;
+  /** ms timestamp of the last drag-coefficient compute dispatch. */
+  private lastDragComputeMs = 0;
   private sliceActive = false;
   private sliceIndicator: THREE.Mesh | null = null;
   private simStepCount = 0;
@@ -182,6 +186,12 @@ export class App {
         this.sliceViewer.setMacros(this.lbm.macrosTextureView);
       }
 
+      // Drag coefficient: integrates pressure × normal over fluid–solid faces
+      // every ~500 ms and reports Cd into the HUD.
+      this.dragCalc = new DragCoeffCalc(device);
+      this.dragCalc.setInputs(this.lbm.macrosTextureView, this.lbm.maskBuffer, latticeDims(this.config.N));
+      this.dragCalc.setUIn(this.config.uIn);
+
       // 3D indicator showing where the slice cuts through the lattice.
       const sliceGeom = new THREE.PlaneGeometry(1, 1);
       const sliceMat = new MeshBasicNodeMaterial({
@@ -240,6 +250,7 @@ export class App {
       this.config.uIn = parseFloat(speedSlider.value);
       speedVal.textContent = this.config.uIn.toFixed(3);
       if (this.lbm) this.lbm.uIn = this.config.uIn;
+      this.dragCalc?.setUIn(this.config.uIn);
       this.refreshReHud();
     });
 
@@ -538,6 +549,7 @@ export class App {
     this.fluidSurface?.setMacrosTexture(this.lbm.macrosTextureView);
     this.fluidSurface?.setMaskBuffer(this.lbm.maskBuffer, { W, H, D });
     this.sliceViewer?.setMacros(this.lbm.macrosTextureView);
+    this.dragCalc?.setInputs(this.lbm.macrosTextureView, this.lbm.maskBuffer, { W, H, D });
     this.rebuildLatticeBox();
     // rebuildObstacle re-voxelizes into the new mask + repushes geometry.
     this.rebuildObstacle();
@@ -936,6 +948,18 @@ export class App {
       const { W, H, D } = latticeDims(this.config.N);
       const mask = voxelizeAnyMesh(worldGeom, { W, H, D }, aabbMin, aabbSize);
       this.lbm.setMaskBuffer(mask);
+      // Frontal (y-z) silhouette area = number of (y,z) columns that have at
+      // least one solid voxel anywhere along x. Feeds the drag-coeff denom.
+      let frontalCells = 0;
+      for (let y = 0; y < H; y++) {
+        for (let z = 0; z < D; z++) {
+          for (let x = 0; x < W; x++) {
+            if (mask[x + y * W + z * W * H] === 1) { frontalCells++; break; }
+          }
+        }
+      }
+      const cellWorld = sx / W;
+      this.dragCalc?.setFrontalArea(frontalCells, cellWorld);
       worldGeom.dispose();
     }
 
@@ -1131,12 +1155,24 @@ export class App {
 
     const now = performance.now();
     this.frameCount++;
+
+    // Dispatch a drag-coefficient compute pass every 500 ms — the integrator
+    // is cheap (one pass over the lattice) and the readback is async so it
+    // doesn't stall the render loop.
+    if (this.dragCalc && now - this.lastDragComputeMs >= 500) {
+      this.dragCalc.compute();
+      this.lastDragComputeMs = now;
+    }
+
     if (now - this.lastFpsUpdate >= 500) {
       const fps = (this.frameCount * 1000) / (now - this.lastFpsUpdate);
       const fpsEl = document.getElementById('rd-fps');
       if (fpsEl) fpsEl.textContent = fps.toFixed(0);
       const cdEl = document.getElementById('rd-cd');
-      if (cdEl) cdEl.textContent = `${this.simStepCount} steps`;
+      if (cdEl) {
+        const cd = this.dragCalc?.getLastCd() ?? 0;
+        cdEl.textContent = cd.toFixed(2);
+      }
       this.frameCount = 0;
       this.lastFpsUpdate = now;
     }
