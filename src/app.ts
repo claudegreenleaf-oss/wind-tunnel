@@ -675,6 +675,7 @@ export class App {
                       this.config.shapeId === 'f1car' || this.config.shapeId === 'cylinder';
     const boundR = elongated ? halfLen : r;
     this.particles?.setObstacle({ x, y: 0, z: 0 }, boundR);
+    this.fluidSurface?.setObstacle({ x, y: 0, z: 0 }, boundR);
     this.particles?.resetAllParticles();
   }
 

@@ -105,9 +105,10 @@ export class FluidSurfaceRenderer {
     //   aabbMin           vec4  (16)
     //   aabbMax           vec4  (16)
     //   sliceMask         vec4  (16) [axis, pos, active, thickness]
-    //   total: 336 bytes
+    //   obstacle          vec4  (16) [centerX, centerY, centerZ, radius]
+    //   total: 352 bytes
     this.uniformBuf = device.createBuffer({
-      size: 336,
+      size: 352,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -412,7 +413,7 @@ export class FluidSurfaceRenderer {
     // Pack uniforms (RenderUniforms struct in WGSL).
     const invProj = proj.clone().invert();
     const invView = view.clone().invert();
-    const buf = new Float32Array(84);
+    const buf = new Float32Array(88);
     buf[0] = 1 / w; buf[1] = 1 / h; buf[2] = 0; buf[3] = 0;
     buf[4] = sphereSize; buf[5] = time; buf[6] = 0; buf[7] = 0;
     buf.set(invProj.elements, 8);
@@ -421,8 +422,13 @@ export class FluidSurfaceRenderer {
     buf.set(invView.elements, 56);
     buf[72] = aabbMin.x; buf[73] = aabbMin.y; buf[74] = aabbMin.z; buf[75] = 0;
     buf[76] = aabbMax.x; buf[77] = aabbMax.y; buf[78] = aabbMax.z; buf[79] = 0;
-    // sliceMask zeroed in this path (SSFR doesn't currently support masking).
+    // sliceMask zeroed in this path.
     buf[80] = 0; buf[81] = 0; buf[82] = 0; buf[83] = 0;
+    // obstacle
+    buf[84] = this.obstacleCenter[0];
+    buf[85] = this.obstacleCenter[1];
+    buf[86] = this.obstacleCenter[2];
+    buf[87] = this.obstacleRadius;
     this.device.queue.writeBuffer(this.uniformBuf, 0, buf.buffer);
 
     const enc = this.device.createCommandEncoder({ label: 'fluid-surface' });
@@ -547,6 +553,17 @@ export class FluidSurfaceRenderer {
     this.sliceMaskThickness = thickness;
   }
 
+  /** Obstacle bound — particles inside this sphere are clipped at vertex stage so
+   *  the obstacle mesh shows through. The particles aren't deleted (that happens
+   *  only on shape change / reset), just visually hidden. */
+  obstacleCenter: [number, number, number] = [0, 0, 0];
+  obstacleRadius = 0;
+
+  setObstacle(center: { x: number; y: number; z: number }, radius: number) {
+    this.obstacleCenter = [center.x, center.y, center.z];
+    this.obstacleRadius = radius;
+  }
+
   /**
    * Render particles as colored opaque impostor spheres straight to canvas.
    * No SSFR filter — each particle is an individual lit sphere.
@@ -589,7 +606,7 @@ export class FluidSurfaceRenderer {
     // Pack uniforms.
     const invProj = proj.clone().invert();
     const invView = view.clone().invert();
-    const buf = new Float32Array(84);
+    const buf = new Float32Array(88);
     buf[0] = 1 / w; buf[1] = 1 / h; buf[2] = 0; buf[3] = 0;
     buf[4] = sphereSize; buf[5] = time; buf[6] = 0; buf[7] = 0;
     buf.set(invProj.elements, 8);
@@ -603,6 +620,11 @@ export class FluidSurfaceRenderer {
     buf[81] = this.sliceMaskPos;
     buf[82] = this.sliceMaskActive ? 1 : 0;
     buf[83] = this.sliceMaskThickness;
+    // obstacle
+    buf[84] = this.obstacleCenter[0];
+    buf[85] = this.obstacleCenter[1];
+    buf[86] = this.obstacleCenter[2];
+    buf[87] = this.obstacleRadius;
     this.device.queue.writeBuffer(this.uniformBuf, 0, buf.buffer);
 
     const enc = this.device.createCommandEncoder({ label: 'direct-spheres' });
@@ -652,6 +674,7 @@ struct RenderUniforms {
     aabbMin       : vec4f,    // x, y, z, pad
     aabbMax       : vec4f,    // x, y, z, pad
     sliceMask     : vec4f,    // axis (0=x,1=y,2=z), pos[0..1], active (0/1), thickness[0..1]
+    obstacle      : vec4f,    // centerX, centerY, centerZ, radius
 };
 `;
 
@@ -1082,6 +1105,15 @@ fn vs_sphere(@builtin(vertex_index) vi : u32, @builtin(instance_index) ii : u32)
     if abs(coord - u.sliceMask.y) > u.sliceMask.w {
       clipped = true;
     }
+  }
+
+  // Obstacle cull: hide particles whose center is inside the obstacle bounding
+  // sphere so the obstacle mesh shows through. Particles still EXIST in the
+  // buffer (only event-driven kill mutates them), but we don't draw them.
+  let r2 = u.obstacle.w * u.obstacle.w;
+  if r2 > 0.0 {
+    let d = worldPos - u.obstacle.xyz;
+    if dot(d, d) < r2 { clipped = true; }
   }
 
   let viewPos = (u.viewMat * vec4f(worldPos, 1.0)).xyz;
