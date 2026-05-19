@@ -191,6 +191,7 @@ export class App {
       this.dragCalc = new DragCoeffCalc(device);
       this.dragCalc.setInputs(this.lbm.macrosTextureView, this.lbm.maskBuffer, latticeDims(this.config.N));
       this.dragCalc.setUIn(this.config.uIn);
+      this.dragCalc.setVisc(this.config.visc);
 
       // 3D indicator showing where the slice cuts through the lattice.
       const sliceGeom = new THREE.PlaneGeometry(1, 1);
@@ -262,6 +263,7 @@ export class App {
       this.config.visc = parseFloat(viscSlider.value);
       viscVal.textContent = this.config.visc.toFixed(4);
       if (this.lbm) this.lbm.visc = this.config.visc;
+      this.dragCalc?.setVisc(this.config.visc);
       this.refreshReHud();
     });
 
@@ -958,8 +960,7 @@ export class App {
           }
         }
       }
-      const cellWorld = sx / W;
-      this.dragCalc?.setFrontalArea(frontalCells, cellWorld);
+      this.dragCalc?.setFrontalArea(frontalCells);
       worldGeom.dispose();
     }
 
