@@ -37,6 +37,7 @@ export class ParticleSystem {
 
   // Particle compute + render (renders into trail RT)
   private advectPipeline!: GPUComputePipeline;
+  private killInsidePipeline!: GPUComputePipeline;
   private renderPipeline!: GPURenderPipeline;
   private advectBgl!: GPUBindGroupLayout;
   private renderBgl!: GPUBindGroupLayout;
@@ -61,6 +62,51 @@ export class ParticleSystem {
   setObstacle(center: { x: number; y: number; z: number }, radius: number) {
     this.obstacleCenter = [center.x, center.y, center.z];
     this.obstacleRadius = radius;
+  }
+
+  /**
+   * Kill (= mark for reseed) any particle currently inside the obstacle
+   * bounding sphere. Call this exactly when the obstacle shape/position
+   * changes or the user explicitly requests a flow reset — NOT every frame.
+   */
+  /**
+   * Mark ALL particles for reseed. Used when the user clicks "Reset flow"
+   * or switches obstacle shape — every particle is dropped and the next
+   * advect tick re-emits them at the inlet.
+   */
+  resetAllParticles() {
+    const init = new Float32Array(this.N * 4);
+    for (let i = 0; i < this.N; i++) {
+      init[i * 4 + 0] = 0;
+      init[i * 4 + 1] = 0;
+      init[i * 4 + 2] = 0;
+      init[i * 4 + 3] = 9999;
+    }
+    this.device.queue.writeBuffer(this.particleBuf, 0, init.buffer);
+    // Also clear prev-pos so the next-frame motion blur quad doesn't streak
+    // from a stale position.
+    this.device.queue.writeBuffer(this.prevPosBuf, 0, new Float32Array(this.N * 4).buffer);
+  }
+
+  killParticlesInsideObstacle() {
+    if (!this.advectBG) return;
+    // Only patch the obstacle slot (bytes 208..224) — leave matrices, aabb,
+    // dims and other in-flight values from the most recent advect intact.
+    const obstacleData = new Float32Array([
+      this.obstacleCenter[0],
+      this.obstacleCenter[1],
+      this.obstacleCenter[2],
+      this.obstacleRadius,
+    ]);
+    this.device.queue.writeBuffer(this.uniformBuf, 52 * 4, obstacleData.buffer);
+
+    const enc = this.device.createCommandEncoder({ label: 'particles-kill-inside' });
+    const cp = enc.beginComputePass();
+    cp.setPipeline(this.killInsidePipeline);
+    cp.setBindGroup(0, this.advectBG);
+    cp.dispatchWorkgroups(Math.ceil(this.N / 64));
+    cp.end();
+    this.device.queue.submit([enc.finish()]);
   }
 
   constructor(
@@ -169,6 +215,11 @@ export class ParticleSystem {
     this.advectPipeline = this.device.createComputePipeline({
       layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.advectBgl] }),
       compute: { module: advectModule, entryPoint: 'cs_advect' },
+    });
+
+    this.killInsidePipeline = this.device.createComputePipeline({
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.advectBgl] }),
+      compute: { module: advectModule, entryPoint: 'cs_kill_inside' },
     });
 
     this.renderPipeline = this.device.createRenderPipeline({
@@ -553,30 +604,24 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
   if !needsReseed {
     // Multi-step advection (T4): 8 sub-steps of dt/8 per frame. This resolves
     // curved flow paths around the obstacle cleanly instead of smearing.
-    // No procedural noise — let the LBM physics drive trajectory shape.
+    // The obstacle-inside check runs in a separate one-shot compute pass
+    // (killInsideObstacle) only when the shape changes or the user resets,
+    // not every frame.
     let SUBSTEPS = 8;
     let subDt = dt / f32(SUBSTEPS);
     var pos = p.xyz;
     var exited = false;
-    var insideObstacle = false;
-    let obstacleR2 = u.obstacle.w * u.obstacle.w;
     for (var k = 0; k < SUBSTEPS; k = k + 1) {
       let uvwSub = (pos - aabbMin) / aabbSize;
       if any(uvwSub < vec3(0.0)) || any(uvwSub > vec3(1.0)) {
         exited = true;
         break;
       }
-      // Kill particles that enter the obstacle bound — they shouldn't exist inside.
-      let d = pos - u.obstacle.xyz;
-      if obstacleR2 > 0.0 && dot(d, d) < obstacleR2 {
-        insideObstacle = true;
-        break;
-      }
       let macros = textureSampleLevel(macrosTex, samp, uvwSub, 0.0);
       let vel_world = macros.xyz * (aabbSize / u.dims.xyz);
       pos = pos + vel_world * subDt;
     }
-    if exited || insideObstacle {
+    if exited {
       needsReseed = true;
     } else {
       p = vec4(pos, p.w + dt / 60.0);
@@ -625,6 +670,24 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
   let didReseed = needsReseed;
   let usePrev = select(p.xyz, oldPos, prevValid > 0.5 && !didReseed);
   prevPos[idx] = vec4(usePrev, 1.0);
+}
+
+// One-shot pass — invoked when the obstacle shape changes or the user clicks
+// "Reset flow". Marks any particle inside the obstacle bounding sphere for
+// reseed; the next normal advect step does the actual reseed via existing
+// "age >= maxAge" logic.
+@compute @workgroup_size(64)
+fn cs_kill_inside(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let idx = gid.x;
+  if idx >= arrayLength(&particles) { return; }
+  let r2 = u.obstacle.w * u.obstacle.w;
+  if r2 <= 0.0 { return; }
+  let p = particles[idx];
+  let d = p.xyz - u.obstacle.xyz;
+  if dot(d, d) < r2 {
+    particles[idx] = vec4(p.xyz, 9999.0);
+    prevPos[idx]   = vec4(p.xyz, 0.0);
+  }
 }
 `;
 

@@ -104,9 +104,10 @@ export class FluidSurfaceRenderer {
     //   invViewMat        mat4  (64)
     //   aabbMin           vec4  (16)
     //   aabbMax           vec4  (16)
-    //   total: 320 bytes
+    //   sliceMask         vec4  (16) [axis, pos, active, thickness]
+    //   total: 336 bytes
     this.uniformBuf = device.createBuffer({
-      size: 320,
+      size: 336,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -408,11 +409,10 @@ export class FluidSurfaceRenderer {
       });
     }
 
-    // Pack uniforms (RenderUniforms struct in WGSL):
-    //   texelSize, sphereTime, invProj, proj, view, invView, aabbMin, aabbMax
+    // Pack uniforms (RenderUniforms struct in WGSL).
     const invProj = proj.clone().invert();
     const invView = view.clone().invert();
-    const buf = new Float32Array(80);
+    const buf = new Float32Array(84);
     buf[0] = 1 / w; buf[1] = 1 / h; buf[2] = 0; buf[3] = 0;
     buf[4] = sphereSize; buf[5] = time; buf[6] = 0; buf[7] = 0;
     buf.set(invProj.elements, 8);
@@ -421,6 +421,8 @@ export class FluidSurfaceRenderer {
     buf.set(invView.elements, 56);
     buf[72] = aabbMin.x; buf[73] = aabbMin.y; buf[74] = aabbMin.z; buf[75] = 0;
     buf[76] = aabbMax.x; buf[77] = aabbMax.y; buf[78] = aabbMax.z; buf[79] = 0;
+    // sliceMask zeroed in this path (SSFR doesn't currently support masking).
+    buf[80] = 0; buf[81] = 0; buf[82] = 0; buf[83] = 0;
     this.device.queue.writeBuffer(this.uniformBuf, 0, buf.buffer);
 
     const enc = this.device.createCommandEncoder({ label: 'fluid-surface' });
@@ -532,6 +534,19 @@ export class FluidSurfaceRenderer {
     this.device.queue.submit([enc.finish()]);
   }
 
+  /** Slice mask config — when active, particles outside the slice band are hidden. */
+  sliceMaskAxis = 0;        // 0=x, 1=y, 2=z
+  sliceMaskPos = 0.5;       // 0..1
+  sliceMaskActive = false;
+  sliceMaskThickness = 0.04;
+
+  setSliceMask(axis: 0 | 1 | 2, pos: number, active: boolean, thickness = 0.04) {
+    this.sliceMaskAxis = axis;
+    this.sliceMaskPos = pos;
+    this.sliceMaskActive = active;
+    this.sliceMaskThickness = thickness;
+  }
+
   /**
    * Render particles as colored opaque impostor spheres straight to canvas.
    * No SSFR filter — each particle is an individual lit sphere.
@@ -574,7 +589,7 @@ export class FluidSurfaceRenderer {
     // Pack uniforms.
     const invProj = proj.clone().invert();
     const invView = view.clone().invert();
-    const buf = new Float32Array(80);
+    const buf = new Float32Array(84);
     buf[0] = 1 / w; buf[1] = 1 / h; buf[2] = 0; buf[3] = 0;
     buf[4] = sphereSize; buf[5] = time; buf[6] = 0; buf[7] = 0;
     buf.set(invProj.elements, 8);
@@ -583,6 +598,11 @@ export class FluidSurfaceRenderer {
     buf.set(invView.elements, 56);
     buf[72] = aabbMin.x; buf[73] = aabbMin.y; buf[74] = aabbMin.z; buf[75] = 0;
     buf[76] = aabbMax.x; buf[77] = aabbMax.y; buf[78] = aabbMax.z; buf[79] = 0;
+    // sliceMask
+    buf[80] = this.sliceMaskAxis;
+    buf[81] = this.sliceMaskPos;
+    buf[82] = this.sliceMaskActive ? 1 : 0;
+    buf[83] = this.sliceMaskThickness;
     this.device.queue.writeBuffer(this.uniformBuf, 0, buf.buffer);
 
     const enc = this.device.createCommandEncoder({ label: 'direct-spheres' });
@@ -631,6 +651,7 @@ struct RenderUniforms {
     invViewMat    : mat4x4f,
     aabbMin       : vec4f,    // x, y, z, pad
     aabbMax       : vec4f,    // x, y, z, pad
+    sliceMask     : vec4f,    // axis (0=x,1=y,2=z), pos[0..1], active (0/1), thickness[0..1]
 };
 `;
 
@@ -1046,8 +1067,27 @@ fn vs_sphere(@builtin(vertex_index) vi : u32, @builtin(instance_index) ii : u32)
   let uv = CORNERS[vi] + 0.5;
 
   let worldPos = particles[ii].xyz;
+
+  // Slice mask: when active, hide particles whose normalized position along
+  // the slice axis falls outside [pos - thickness, pos + thickness].
+  var clipped = false;
+  if u.sliceMask.z > 0.5 {
+    let axis = i32(u.sliceMask.x + 0.5);
+    let aabbSize = u.aabbMax.xyz - u.aabbMin.xyz;
+    let lUvw = (worldPos - u.aabbMin.xyz) / aabbSize;
+    var coord = 0.0;
+    if axis == 0      { coord = lUvw.x; }
+    else if axis == 1 { coord = lUvw.y; }
+    else              { coord = lUvw.z; }
+    if abs(coord - u.sliceMask.y) > u.sliceMask.w {
+      clipped = true;
+    }
+  }
+
   let viewPos = (u.viewMat * vec4f(worldPos, 1.0)).xyz;
-  let outClip = u.projMat * vec4f(viewPos + vec3f(corner2, 0.0), 1.0);
+  var outClip = u.projMat * vec4f(viewPos + vec3f(corner2, 0.0), 1.0);
+  // Send clipped vertices to NDC-infinity so they're guaranteed culled.
+  if clipped { outClip = vec4f(2.0, 2.0, 2.0, 1.0); }
 
   var out : VertOut;
   out.position = outClip;

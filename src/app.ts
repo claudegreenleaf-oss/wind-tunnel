@@ -45,6 +45,7 @@ export class App {
   private fluidSurface: FluidSurfaceRenderer | null = null;
   private sliceViewer: SliceViewer | null = null;
   private sliceActive = false;
+  private sliceIndicator: THREE.Mesh | null = null;
   private simStepCount = 0;
   private rafId = 0;
   private running = false;
@@ -170,6 +171,19 @@ export class App {
         this.sliceViewer = new SliceViewer(device, sliceCanvas);
         this.sliceViewer.setMacros(this.lbm.macrosTextureView);
       }
+
+      // 3D indicator showing where the slice cuts through the lattice.
+      const sliceGeom = new THREE.PlaneGeometry(1, 1);
+      const sliceMat = new MeshBasicNodeMaterial({
+        color: 0x6bf0d6,
+        transparent: true,
+        opacity: 0.18,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      this.sliceIndicator = new THREE.Mesh(sliceGeom, sliceMat);
+      this.sliceIndicator.visible = false;
+      this.scene.add(this.sliceIndicator);
     }
 
     this.wireUI();
@@ -264,6 +278,7 @@ export class App {
 
     q<HTMLButtonElement>('#btn-reset').addEventListener('click', () => {
       this.lbm?.resetFlow();
+      this.particles?.resetAllParticles();
       this.simStepCount = 0;
     });
 
@@ -397,15 +412,18 @@ export class App {
       sliceLegendHi.textContent = hi;
     };
 
+    const sliceMaskCb = q<HTMLInputElement>('#cb-slice-mask');
     const pushSliceConfig = () => {
       if (!this.sliceViewer) return;
-      this.sliceViewer.setConfig(
-        sliceAxis.value as SliceAxis,
-        parseFloat(slicePos.value),
-        sliceField.value as SliceField,
-      );
+      const axisStr = sliceAxis.value as SliceAxis;
+      const pos = parseFloat(slicePos.value);
+      this.sliceViewer.setConfig(axisStr, pos, sliceField.value as SliceField);
       refreshSliceLabels();
+      this.updateSliceIndicator(axisStr, pos);
+      const axisIdx: 0 | 1 | 2 = axisStr === 'x' ? 0 : axisStr === 'y' ? 1 : 2;
+      this.fluidSurface?.setSliceMask(axisIdx, pos, sliceMaskCb.checked, 0.04);
     };
+    sliceMaskCb.addEventListener('change', pushSliceConfig);
 
     sliceBtn.addEventListener('click', () => {
       this.sliceActive = !this.sliceActive;
@@ -415,6 +433,7 @@ export class App {
         if (this.sliceActive) sliceOverlay.removeAttribute('hidden');
         else sliceOverlay.setAttribute('hidden', '');
       }
+      if (this.sliceIndicator) this.sliceIndicator.visible = this.sliceActive;
     });
     sliceAxis.addEventListener('change', pushSliceConfig);
     sliceField.addEventListener('change', pushSliceConfig);
@@ -490,6 +509,26 @@ export class App {
     }
   }
 
+  /** Position+orient the slice indicator plane based on axis + position [0,1]. */
+  private updateSliceIndicator(axis: SliceAxis, pos: number) {
+    if (!this.sliceIndicator) return;
+    const { sx, sy, sz } = this.latticeWorld();
+    const m = this.sliceIndicator;
+    if (axis === 'x') {
+      m.scale.set(sz, sy, 1);
+      m.rotation.set(0, Math.PI / 2, 0);
+      m.position.set(-sx * 0.5 + sx * pos, 0, 0);
+    } else if (axis === 'y') {
+      m.scale.set(sx, sz, 1);
+      m.rotation.set(-Math.PI / 2, 0, 0);
+      m.position.set(0, -sy * 0.5 + sy * pos, 0);
+    } else {
+      m.scale.set(sx, sy, 1);
+      m.rotation.set(0, 0, 0);
+      m.position.set(0, 0, -sz * 0.5 + sz * pos);
+    }
+  }
+
   /** Recursively assign a Three.js layer to a Mesh or Group of meshes. */
   private setMeshLayer(obj: THREE.Object3D, layer: number) {
     obj.layers.set(layer);
@@ -500,14 +539,14 @@ export class App {
 
   private makeMat() {
     // Friction-driven obstacle material.
-    // Tangential shear at a body in flow peaks on the windward face (front
-    // stagnation/shoulder zone) and drops to ~zero on the leeward side. Use
-    // a normal · flow-direction proxy to color each surface fragment:
-    //   front of obstacle (facing +X inlet) → hot red/yellow (high friction)
-    //   shoulders                            → green/cyan (moderate)
-    //   back / wake                          → deep blue (low friction)
-    const flowDir = vec3(1, 0, 0);
-    const frontness = clamp(dot(normalWorld, flowDir), 0, 1);
+    // Wind blows in +X (from inlet at -X to outlet at +X). The windward face
+    // is the one whose normal points BACK toward the inlet (i.e. -X). That
+    // face takes the highest stagnation-pressure / friction load.
+    //   windward face (facing inlet) → hot red/yellow (high friction)
+    //   shoulders                    → green/cyan (moderate)
+    //   leeward face (wake side)     → deep blue (low friction)
+    const upstream = vec3(-1, 0, 0);
+    const frontness = clamp(dot(normalWorld, upstream), 0, 1);
 
     // Tuned turbo-style ramp focused on the [0,1] range.
     const c0 = vec3(0.06, 0.18, 0.55);   // deep blue (back)
@@ -630,12 +669,13 @@ export class App {
     this.obstacleMesh.position.set(x, 0, 0);
     this.scene.add(this.obstacleMesh);
 
-    // Push the obstacle bound to the particle system so particles inside get killed.
-    // For compact shapes use radius r; for elongated shapes use halfLen.
+    // Update the obstacle bound, then WIPE all particles (per user spec —
+    // changing shape should clear the scene and let the new flow develop).
     const elongated = this.config.shapeId === 'cone' || this.config.shapeId === 'wing' ||
                       this.config.shapeId === 'f1car' || this.config.shapeId === 'cylinder';
     const boundR = elongated ? halfLen : r;
     this.particles?.setObstacle({ x, y: 0, z: 0 }, boundR);
+    this.particles?.resetAllParticles();
   }
 
   private wireDragDrop() {

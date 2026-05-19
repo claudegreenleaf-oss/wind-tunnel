@@ -137,6 +137,12 @@
             <label>Position <span class="val" id="val-slice-pos"></span>
               <input id="sl-slice-pos" type="range" min="0" max="1" step="0.005" value="0.5" />
             </label>
+            <div class="row">
+              <label class="checkbox">
+                <input id="cb-slice-mask" type="checkbox" />
+                <span>Mask 3D view to slice</span>
+              </label>
+            </div>
           </div>
         </section>
 
@@ -186,6 +192,8 @@
       #slice-overlay .legend-bar { flex:1; height:8px; margin:0 8px; border-radius:4px; background: linear-gradient(to right, #1a0b3a, #1a66f2, #1ad5d5, #4df24d, #f8d91a, #ff4019); }
       #panel select { background:#0e0f15; color:#e7e9f0; border:1px solid #1f1f2c; padding:4px 6px; border-radius:4px; font-family:inherit; font-size:0.85rem; flex:1; }
       #panel label.inline { font-size:0.82rem; margin-right:6px; min-width:38px; }
+      #panel label.checkbox { display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer; }
+      #panel label.checkbox input { width:14px; height:14px; cursor:pointer; }
     </style>
     <script>
       document.querySelectorAll('#panel .group h2').forEach(h2 => {
