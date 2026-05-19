@@ -257,18 +257,6 @@ export class App {
       if (this.lbm) this.lbm.aoaRad = (this.config.aoaDeg * Math.PI) / 180;
     });
 
-    const dyeSlider = q<HTMLInputElement>('#sl-dye');
-    const dyeVal = q<HTMLSpanElement>('#val-dye');
-    dyeSlider.value = String(this.config.dyeAmount);
-    dyeVal.textContent = this.config.dyeAmount.toFixed(2);
-    dyeSlider.addEventListener('input', () => {
-      this.config.dyeAmount = parseFloat(dyeSlider.value);
-      dyeVal.textContent = this.config.dyeAmount.toFixed(2);
-      if (this.dye) this.dye.injectAmount = this.config.dyeAmount;
-    });
-    // Push initial value once at startup.
-    if (this.dye) this.dye.injectAmount = this.config.dyeAmount;
-
     const speedMul = q<HTMLInputElement>('#sl-speed-mul');
     const speedMulVal = q<HTMLSpanElement>('#val-speed-mul');
     speedMul.value = String(this.config.simSpeed);
