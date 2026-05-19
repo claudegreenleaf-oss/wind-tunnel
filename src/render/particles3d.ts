@@ -71,16 +71,25 @@ export class ParticleSystem {
    */
   /**
    * Mark ALL particles for reseed. Used when the user clicks "Reset flow"
-   * or switches obstacle shape — every particle is dropped and the next
-   * advect tick re-emits them at the inlet.
+   * or switches obstacle shape — every particle disappears (parked off-screen
+   * in a dormant state) and the inflow restarts from the inlet over the
+   * next ~RESET_STAGGER_FRAMES frames.
+   *
+   * Encoding: ages in (maxAge, maxAge + RESET_STAGGER_FRAMES] tell the shader
+   * "dormant, tick down by 1 each frame". When age crosses back to maxAge,
+   * the existing reseed branch fires (non-initial, so it uses the inlet face,
+   * not the tube-fill path).
    */
   resetAllParticles() {
+    const MAX_AGE = 600;
+    const STAGGER = 60;                                 // ~1s at 60fps
     const init = new Float32Array(this.N * 4);
     for (let i = 0; i < this.N; i++) {
       init[i * 4 + 0] = 0;
       init[i * 4 + 1] = 0;
       init[i * 4 + 2] = 0;
-      init[i * 4 + 3] = 9999;
+      // Random stagger so particles emerge from the inlet over ~1s, not all at once.
+      init[i * 4 + 3] = MAX_AGE + 1 + Math.random() * STAGGER;
     }
     this.device.queue.writeBuffer(this.particleBuf, 0, init.buffer);
     // Also clear prev-pos so the next-frame motion blur quad doesn't streak
@@ -629,6 +638,23 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
   }
 
   if needsReseed {
+    // Reset-dormant state: ages in (maxAge, maxAge + 200] mean "user just hit
+    // Reset flow / switched shape — disappear and wait, then re-emit from the
+    // inlet over the next ~stagger frames." We tick the age DOWN by 1.0 each
+    // frame; once it crosses maxAge the normal (non-initial) reseed branch
+    // below fires on the next pass.
+    let isInitialSeed : bool = p.w > 9000.0;
+    if !isInitialSeed && p.w > maxAge + 0.5 && p.w < 9000.0 {
+      let newAge = p.w - 1.0;
+      // Park the particle off-screen (well outside the AABB on the -X side)
+      // so the sphere renderer's clip kills it. Spheres are world-space points
+      // transformed by view/proj — anything off-screen is just gone.
+      let off = vec3(aabbMin.x - aabbSize.x * 2.0, 0.0, 0.0);
+      particles[idx] = vec4(off, newAge);
+      prevPos[idx] = vec4(off, 0.0);
+      return;
+    }
+
     let r = hash31(seed, idx);
     // Sample a point inside the inlet jet disc (matches LBM jet radius).
     let theta = r.x * 6.2831853;
@@ -643,7 +669,6 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
     // First-time seed (age set to 9999 on JS init) — distribute along the jet
     // tube length so the volume looks populated immediately. Subsequent reseeds
     // come back to the inlet face.
-    let isInitialSeed : bool = p.w > 9000.0;
     if isInitialSeed {
       p = vec4(
         aabbMin.x + r.z * aabbSize.x,
