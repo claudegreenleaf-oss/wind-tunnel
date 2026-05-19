@@ -22,6 +22,8 @@ export class LBM3D {
   uIn = 0.08;
   visc = 0.005;
   aoaRad = 0;
+  /** Inlet jet disc radius as a fraction of the cross-section. */
+  inletR = 0.12;
   gravity: [number, number, number] = [0, 0, 0];
   useMRT = 0;   // 0 = BGK, 1 = TRT
   useLES = 0;   // 0 = off, 1 = Smagorinsky LES
@@ -215,7 +217,7 @@ export class LBM3D {
     f32[4] = omega;
     f32[5] = this.uIn;
     f32[6] = this.aoaRad;
-    f32[7] = 0;
+    f32[7] = this.inletR;
     f32[8] = this.gravity[0];
     f32[9] = this.gravity[1];
     f32[10] = this.gravity[2];

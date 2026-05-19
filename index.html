@@ -79,6 +79,12 @@
             <label>Angle of attack <span class="val" id="val-aoa"></span>
               <input id="sl-aoa" type="range" min="-30" max="30" step="1" />
             </label>
+            <label>Inlet size <span class="val" id="val-inlet">12%</span>
+              <input id="sl-inlet" type="range" min="0.04" max="0.45" step="0.005" value="0.12" />
+            </label>
+            <label>Ball size <span class="val" id="val-ball">1.00×</span>
+              <input id="sl-ball" type="range" min="0.3" max="3" step="0.05" value="1" />
+            </label>
           </div>
         </section>
 
@@ -185,6 +191,13 @@
       <span>Drop .glb or .obj to voxelize as obstacle</span>
     </div>
 
+    <!-- Floating Cd overlay (top-left). Mirrors the panel readout but big. -->
+    <div id="cd-overlay">
+      <div class="cd-label">Drag coefficient</div>
+      <div class="cd-value" id="cd-overlay-value">—</div>
+      <div class="cd-sub" id="cd-overlay-sub">Cd · live</div>
+    </div>
+
     <!-- Picture-in-picture slice viewer (hidden by default) -->
     <div id="slice-overlay" hidden>
       <div class="slice-title">
@@ -201,6 +214,10 @@
       #drop-overlay { position:fixed; inset:0; pointer-events:auto; cursor:copy; backdrop-filter:blur(4px); background:rgba(11,180,120,0.15); display:flex; align-items:center; justify-content:center; z-index:100; font-size:1.4rem; color:#6bf0d6; font-family:sans-serif; letter-spacing:0.05em; }
       #drop-overlay[hidden] { display:none !important; }
 
+      #cd-overlay { position:fixed; left:24px; top:24px; z-index:50; background:rgba(11,12,18,0.78); border:1px solid #1f1f2c; border-radius:10px; padding:12px 18px; font-family:sans-serif; color:#a3a8b8; backdrop-filter:blur(8px); box-shadow:0 4px 18px rgba(0,0,0,0.5); pointer-events:none; min-width:140px; }
+      #cd-overlay .cd-label { font-size:0.7rem; letter-spacing:0.12em; text-transform:uppercase; color:#6bf0d6; margin-bottom:4px; }
+      #cd-overlay .cd-value { font-size:2.2rem; font-weight:600; color:#e7e9f0; line-height:1; font-variant-numeric:tabular-nums; }
+      #cd-overlay .cd-sub { font-size:0.68rem; letter-spacing:0.08em; color:#5b6076; margin-top:4px; }
       #slice-overlay { position:fixed; left:24px; bottom:24px; z-index:50; background:rgba(11,12,18,0.78); border:1px solid #1f1f2c; border-radius:10px; padding:10px; font-family:sans-serif; color:#a3a8b8; backdrop-filter:blur(8px); box-shadow:0 4px 18px rgba(0,0,0,0.5); }
       #slice-overlay[hidden] { display:none !important; }
       #slice-overlay .slice-title { font-size:0.72rem; letter-spacing:0.12em; text-transform:uppercase; margin-bottom:6px; color:#6bf0d6; }

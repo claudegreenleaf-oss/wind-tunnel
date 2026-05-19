@@ -58,6 +58,8 @@ export class ParticleSystem {
   // Obstacle bound (sphere): particles entering this volume get reseeded.
   private obstacleCenter: [number, number, number] = [0, 0, 0];
   private obstacleRadius = 0;
+  /** Inlet jet disc radius (fraction of cross-section), matches LBM inletR. */
+  jetRadius = 0.12;
 
   setObstacle(center: { x: number; y: number; z: number }, radius: number) {
     this.obstacleCenter = [center.x, center.y, center.z];
@@ -367,6 +369,9 @@ export class ParticleSystem {
     buf[53] = this.obstacleCenter[1];
     buf[54] = this.obstacleCenter[2];
     buf[55] = this.obstacleRadius;
+    // Extras: jetRadius then 3 pads.
+    buf[56] = this.jetRadius;
+    buf[57] = 0; buf[58] = 0; buf[59] = 0;
     this.device.queue.writeBuffer(this.uniformBuf, 0, buf.buffer);
     this.frame++;
   }
@@ -473,6 +478,7 @@ struct Uniforms {
   dims      : vec4<f32>,        // W, H, D, _
   params    : vec4<f32>,        // dt, maxAge, frameSeed, pointSize
   obstacle  : vec4<f32>,        // centerX, centerY, centerZ, radius
+  extras    : vec4<f32>,        // jetRadius (matches LBM inletR), pad, pad, pad
 };
 
 fn hash11(n : f32) -> f32 {
@@ -661,7 +667,7 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
     let r = hash31(seed, idx);
     // Sample a point inside the inlet jet disc (matches LBM jet radius).
     let theta = r.x * 6.2831853;
-    let radius = sqrt(r.y) * 0.12;
+    let radius = sqrt(r.y) * u.extras.x;
     let dy = radius * cos(theta);
     let dz = radius * sin(theta);
     let centerY = aabbMin.y + 0.5 * aabbSize.y;

@@ -19,7 +19,7 @@ struct Params {
   omega:    f32,
   uIn:      f32,
   aoaRad:   f32,
-  _pad0:    f32,
+  inletR:   f32,        // jet disc radius as fraction of cross-section
   gravity:  vec4<f32>,  // gx, gy, gz, pad
   useMRT:   u32,        // 0=BGK, 1=TRT
   useLES:   u32,        // 0=off, 1=Smagorinsky
@@ -225,7 +225,7 @@ fn cs_step(@builtin(global_invocation_id) gid: vec3<u32>) {
     let cy = (f32(gid.y) + 0.5) / H - 0.5;
     let cz = (f32(gid.z) + 0.5) / D - 0.5;
     let r = sqrt(cy * cy + cz * cz);
-    let jetR = 0.12;                                 // small jet — ~24% of cross-section
+    let jetR = params.inletR;                         // configurable inlet disc radius
     let edgeBlend = 0.04;                            // smooth boundary
     let profile = 1.0 - smoothstep(jetR - edgeBlend, jetR + edgeBlend, r);
     rho = 1.0;

@@ -133,6 +133,7 @@ export class App {
       this.lbm.visc = this.config.visc;
       this.lbm.aoaRad = (this.config.aoaDeg * Math.PI) / 180;
       this.lbm.gravity = this.config.gravity;
+      this.lbm.inletR = this.config.inletRadius;
       // Only the parametric primitives have an LBM-side voxelizer; remote
       // models flow through rebuildObstacle → uploadObstacleToFluidSurface.
       const BUILTINS: ReadonlySet<string> = new Set(['sphere', 'cylinder', 'cone', 'wing', 'teapot']);
@@ -163,6 +164,7 @@ export class App {
         },
       );
       this.particles.setMacrosTexture(this.lbm.macrosTextureView);
+      this.particles.jetRadius = this.config.inletRadius;
 
       // Screen-space fluid surface renderer (Splash-style: depth → smooth → normals → fresnel).
       this.fluidSurface = new FluidSurfaceRenderer(
@@ -275,6 +277,26 @@ export class App {
       this.config.aoaDeg = parseFloat(aoaSlider.value);
       aoaVal.textContent = `${this.config.aoaDeg}°`;
       if (this.lbm) this.lbm.aoaRad = (this.config.aoaDeg * Math.PI) / 180;
+    });
+
+    const inletSlider = q<HTMLInputElement>('#sl-inlet');
+    const inletVal = q<HTMLSpanElement>('#val-inlet');
+    inletSlider.value = String(this.config.inletRadius);
+    inletVal.textContent = `${Math.round(this.config.inletRadius * 100)}%`;
+    inletSlider.addEventListener('input', () => {
+      this.config.inletRadius = parseFloat(inletSlider.value);
+      inletVal.textContent = `${Math.round(this.config.inletRadius * 100)}%`;
+      if (this.lbm) this.lbm.inletR = this.config.inletRadius;
+      if (this.particles) this.particles.jetRadius = this.config.inletRadius;
+    });
+
+    const ballSlider = q<HTMLInputElement>('#sl-ball');
+    const ballVal = q<HTMLSpanElement>('#val-ball');
+    ballSlider.value = String(this.config.ballSize);
+    ballVal.textContent = `${this.config.ballSize.toFixed(2)}×`;
+    ballSlider.addEventListener('input', () => {
+      this.config.ballSize = parseFloat(ballSlider.value);
+      ballVal.textContent = `${this.config.ballSize.toFixed(2)}×`;
     });
 
     const speedMul = q<HTMLInputElement>('#sl-speed-mul');
@@ -1149,7 +1171,7 @@ export class App {
         const dt = 6.0 * this.config.simSpeed;
         this.particles.advectOnly(view, proj, camPos, aabbMin, aabbMax, { W, H, D }, { dt });
       }
-      const sphereSize = sx / 170;                      // smaller individual spheres
+      const sphereSize = (sx / 170) * this.config.ballSize;
       const t = performance.now() * 0.001;
 
       // Push the obstacle's current world matrix to the obstacle pipeline so
@@ -1183,11 +1205,11 @@ export class App {
       const fps = (this.frameCount * 1000) / (now - this.lastFpsUpdate);
       const fpsEl = document.getElementById('rd-fps');
       if (fpsEl) fpsEl.textContent = fps.toFixed(0);
+      const cd = this.dragCalc?.getLastCd() ?? 0;
       const cdEl = document.getElementById('rd-cd');
-      if (cdEl) {
-        const cd = this.dragCalc?.getLastCd() ?? 0;
-        cdEl.textContent = cd.toFixed(2);
-      }
+      if (cdEl) cdEl.textContent = cd.toFixed(2);
+      const cdOverlay = document.getElementById('cd-overlay-value');
+      if (cdOverlay) cdOverlay.textContent = cd.toFixed(2);
       this.frameCount = 0;
       this.lastFpsUpdate = now;
     }

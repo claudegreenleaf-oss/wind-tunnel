@@ -27,6 +27,8 @@ export interface SimConfig {
   rollDeg: number;    // rotation around flow (X) axis
   scaleMul: number;   // 1 = registry default size
   obstacleXFrac: number;  // 0 = at inlet, 1 = at outlet; default 0.3
+  inletRadius: number;    // jet disc radius as a fraction of cross-section; default 0.12
+  ballSize: number;       // multiplier on the rendered particle sphere size; default 1.0
   // Visualization
   dyeAmount: number;
   // Time
@@ -50,6 +52,8 @@ export function defaultConfig(): SimConfig {
     rollDeg: 0,
     scaleMul: 1,
     obstacleXFrac: 0.3,
+    inletRadius: 0.12,
+    ballSize: 1.0,
     dyeAmount: 1.0,
     paused: false,
     simSpeed: 1.0,

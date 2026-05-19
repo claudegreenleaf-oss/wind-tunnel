@@ -5,7 +5,7 @@ struct Params {
   omega: f32,
   uIn: f32,
   aoaRad: f32,
-  _pad: f32,
+  inletR: f32,
   gravity: vec4<f32>,
 };
 
