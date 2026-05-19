@@ -11,6 +11,7 @@ import { DyeField3D } from './sim/dye3d';
 import { VolumeRenderer } from './render/volume3d';
 import { ParticleSystem } from './render/particles3d';
 import { FluidSurfaceRenderer } from './render/fluidSurface';
+import { SliceViewer, type SliceAxis, type SliceField } from './render/sliceViewer';
 import type { ShapeId } from './sim/voxelize';
 import { voxelizeMesh } from './obstacles/upload';
 import { showToast } from './ui/toast';
@@ -42,6 +43,8 @@ export class App {
   private volumeRenderer: VolumeRenderer | null = null;
   private particles: ParticleSystem | null = null;
   private fluidSurface: FluidSurfaceRenderer | null = null;
+  private sliceViewer: SliceViewer | null = null;
+  private sliceActive = false;
   private simStepCount = 0;
   private rafId = 0;
   private running = false;
@@ -160,6 +163,13 @@ export class App {
         this.particles.N,
       );
       this.fluidSurface.setMacrosTexture(this.lbm.macrosTextureView);
+
+      // Picture-in-picture slice viewer (its own canvas in the corner).
+      const sliceCanvas = document.getElementById('slice-canvas') as HTMLCanvasElement | null;
+      if (sliceCanvas) {
+        this.sliceViewer = new SliceViewer(device, sliceCanvas);
+        this.sliceViewer.setMacros(this.lbm.macrosTextureView);
+      }
     }
 
     this.wireUI();
@@ -360,6 +370,56 @@ export class App {
     });
 
     this.wireInject();
+
+    // Slice viewer controls.
+    const sliceBtn = q<HTMLButtonElement>('#btn-slice');
+    const sliceAxis = q<HTMLSelectElement>('#sel-slice-axis');
+    const sliceField = q<HTMLSelectElement>('#sel-slice-field');
+    const slicePos = q<HTMLInputElement>('#sl-slice-pos');
+    const slicePosVal = q<HTMLSpanElement>('#val-slice-pos');
+    const sliceOverlay = document.getElementById('slice-overlay');
+    const sliceTitle = q<HTMLSpanElement>('#slice-title-text');
+    const sliceLegendLo = q<HTMLSpanElement>('#slice-legend-lo');
+    const sliceLegendHi = q<HTMLSpanElement>('#slice-legend-hi');
+
+    const refreshSliceLabels = () => {
+      slicePosVal.textContent = parseFloat(slicePos.value).toFixed(2);
+      const axisLbl = sliceAxis.value.toUpperCase();
+      const fieldLbl = sliceField.value[0].toUpperCase() + sliceField.value.slice(1);
+      sliceTitle.textContent = `${axisLbl}-slice · ${fieldLbl}`;
+      const ranges: Record<string, [string, string]> = {
+        velocity: ['0', '0.10'],
+        pressure: ['0', '0.04'],
+        vorticity: ['0', '0.033'],
+      };
+      const [lo, hi] = ranges[sliceField.value];
+      sliceLegendLo.textContent = lo;
+      sliceLegendHi.textContent = hi;
+    };
+
+    const pushSliceConfig = () => {
+      if (!this.sliceViewer) return;
+      this.sliceViewer.setConfig(
+        sliceAxis.value as SliceAxis,
+        parseFloat(slicePos.value),
+        sliceField.value as SliceField,
+      );
+      refreshSliceLabels();
+    };
+
+    sliceBtn.addEventListener('click', () => {
+      this.sliceActive = !this.sliceActive;
+      sliceBtn.textContent = this.sliceActive ? 'Slice: On' : 'Slice: Off';
+      sliceBtn.classList.toggle('active', this.sliceActive);
+      if (sliceOverlay) {
+        if (this.sliceActive) sliceOverlay.removeAttribute('hidden');
+        else sliceOverlay.setAttribute('hidden', '');
+      }
+    });
+    sliceAxis.addEventListener('change', pushSliceConfig);
+    sliceField.addEventListener('change', pushSliceConfig);
+    slicePos.addEventListener('input', pushSliceConfig);
+    pushSliceConfig();
 
     this.refreshReHud();
   }
@@ -741,6 +801,11 @@ export class App {
       const sphereSize = sx / 170;                      // smaller individual spheres
       const t = performance.now() * 0.001;
       this.fluidSurface.renderRawSpheres(view, proj, sphereSize, t, aabbMin, aabbMax);
+
+      // Picture-in-picture slice viewer.
+      if (this.sliceActive && this.sliceViewer) {
+        this.sliceViewer.render(aabbMin, aabbMax, { W, H, D });
+      }
 
     }
 

@@ -112,6 +112,34 @@
           </div>
         </section>
 
+        <section class="group">
+          <h2>Slice viewer</h2>
+          <div class="group-body">
+            <div class="row">
+              <button id="btn-slice" class="btn btn-toggle">Slice: Off</button>
+            </div>
+            <div class="row">
+              <label class="inline">Axis</label>
+              <select id="sel-slice-axis">
+                <option value="x">X (perp. to flow)</option>
+                <option value="y" selected>Y (horizontal)</option>
+                <option value="z">Z (vertical along flow)</option>
+              </select>
+            </div>
+            <div class="row">
+              <label class="inline">Field</label>
+              <select id="sel-slice-field">
+                <option value="velocity" selected>Velocity</option>
+                <option value="pressure">Pressure</option>
+                <option value="vorticity">Vorticity</option>
+              </select>
+            </div>
+            <label>Position <span class="val" id="val-slice-pos"></span>
+              <input id="sl-slice-pos" type="range" min="0" max="1" step="0.005" value="0.5" />
+            </label>
+          </div>
+        </section>
+
         <section class="group hud">
           <h2>Readout</h2>
           <div class="group-body">
@@ -133,9 +161,31 @@
     <div id="drop-overlay" hidden>
       <span>Drop .glb or .obj to voxelize as obstacle</span>
     </div>
+
+    <!-- Picture-in-picture slice viewer (hidden by default) -->
+    <div id="slice-overlay" hidden>
+      <div class="slice-title">
+        <span id="slice-title-text">Slice</span>
+      </div>
+      <canvas id="slice-canvas" width="320" height="320"></canvas>
+      <div class="slice-legend">
+        <span class="legend-lo" id="slice-legend-lo">low</span>
+        <span class="legend-bar"></span>
+        <span class="legend-hi" id="slice-legend-hi">high</span>
+      </div>
+    </div>
     <style>
       #drop-overlay { position:fixed; inset:0; pointer-events:auto; cursor:copy; backdrop-filter:blur(4px); background:rgba(11,180,120,0.15); display:flex; align-items:center; justify-content:center; z-index:100; font-size:1.4rem; color:#6bf0d6; font-family:sans-serif; letter-spacing:0.05em; }
       #drop-overlay[hidden] { display:none !important; }
+
+      #slice-overlay { position:fixed; left:24px; bottom:24px; z-index:50; background:rgba(11,12,18,0.78); border:1px solid #1f1f2c; border-radius:10px; padding:10px; font-family:sans-serif; color:#a3a8b8; backdrop-filter:blur(8px); box-shadow:0 4px 18px rgba(0,0,0,0.5); }
+      #slice-overlay[hidden] { display:none !important; }
+      #slice-overlay .slice-title { font-size:0.72rem; letter-spacing:0.12em; text-transform:uppercase; margin-bottom:6px; color:#6bf0d6; }
+      #slice-overlay canvas { display:block; border-radius:6px; image-rendering:pixelated; background:#000; }
+      #slice-overlay .slice-legend { display:flex; align-items:center; justify-content:space-between; margin-top:6px; font-size:0.66rem; letter-spacing:0.06em; }
+      #slice-overlay .legend-bar { flex:1; height:8px; margin:0 8px; border-radius:4px; background: linear-gradient(to right, #1a0b3a, #1a66f2, #1ad5d5, #4df24d, #f8d91a, #ff4019); }
+      #panel select { background:#0e0f15; color:#e7e9f0; border:1px solid #1f1f2c; padding:4px 6px; border-radius:4px; font-family:inherit; font-size:0.85rem; flex:1; }
+      #panel label.inline { font-size:0.82rem; margin-right:6px; min-width:38px; }
     </style>
     <script>
       document.querySelectorAll('#panel .group h2').forEach(h2 => {
