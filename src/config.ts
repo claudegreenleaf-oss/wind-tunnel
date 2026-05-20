@@ -53,17 +53,12 @@ export interface SimConfig {
 export function defaultConfig(): SimConfig {
   return {
     N: 80,
-    uIn: 0.12,        // moderate inlet velocity
-    // Lower default viscosity than before (was 0.020) to raise Re into the
-    // shedding regime; TRT + LES keep things stable at that Re.
-    visc: 0.010,
+    uIn: 0.12,        // moderate — clean streamlines without violent vortex shedding
+    visc: 0.020,      // higher visc → laminar-ish flow, cleaner wake structure
     aoaDeg: 0,
     gravity: [0, 0, 0],
-    // TRT collision is the modern default — drastically more accurate than
-    // single-relaxation BGK at the same cost. LES on by default keeps
-    // sub-grid turbulence dissipation honest at the higher Re.
-    useMRT: true,
-    useLES: true,
+    useMRT: false,
+    useLES: false,
     freeSlip: false,
     shapeId: 'sphere',
     yawDeg: 0,
