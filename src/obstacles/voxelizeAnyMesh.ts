@@ -25,9 +25,21 @@ export function voxelizeAnyMesh(
   dims: { W: number; H: number; D: number },
   worldAabbMin: THREE.Vector3,
   worldAabbSize: THREE.Vector3,
+  /**
+   * Optional pre-solid mask (e.g. a floor band) merged BEFORE the flood-fill
+   * so any fluid pocket trapped between the obstacle and the pre-solid gets
+   * correctly classified as interior. Same layout as the return value.
+   */
+  preSolid?: Uint32Array,
 ): Uint32Array {
   const { W, H, D } = dims;
   const mask = new Uint32Array(W * H * D);
+
+  // Merge pre-solid cells (e.g. floor) before surface voxelization so the
+  // flood-fill at the end sees them as walls.
+  if (preSolid) {
+    for (let i = 0; i < mask.length; i++) if (preSolid[i]) mask[i] = 1;
+  }
 
   const pos = geometry.getAttribute('position');
   if (!pos) return mask;

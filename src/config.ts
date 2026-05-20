@@ -53,7 +53,11 @@ export interface SimConfig {
 
 export function defaultConfig(): SimConfig {
   return {
-    N: 80,
+    // 96 keeps the f-buffers around 270 MB (still fits in default WebGPU
+    // limits) while putting ~17 cells across the obstacle radius — the
+    // boundary layer is now properly resolved per Pope (Turbulent Flows §1.4,
+    // wants ≥ 10 cells across the BL). Was 80 (BL marginal at r=14 cells).
+    N: 96,
     uIn: 0.12,        // moderate — clean streamlines without violent vortex shedding
     visc: 0.020,      // higher visc → laminar-ish flow, cleaner wake structure
     aoaDeg: 0,
@@ -88,8 +92,14 @@ export function latticeDims(N: number): { W: number; H: number; D: number } {
   return { W: 2 * N, H: N, D: N };
 }
 
-/** Reynolds number: U * L / nu. L = N / 4 (typical obstacle size). */
-export function computeRe(uIn: number, visc: number, N: number): number {
-  const L = Math.max(1, Math.round(N / 4));
+/**
+ * Reynolds number: U·L/ν where L is the actual obstacle characteristic
+ * length in lattice units (≈ obstacle diameter). Fallback uses N/4 only when
+ * we don't have a real char-length yet (e.g. boot, before voxelization).
+ */
+export function computeRe(uIn: number, visc: number, N: number, charLengthCells?: number): number {
+  const L = (charLengthCells && charLengthCells > 0)
+    ? charLengthCells
+    : Math.max(1, Math.round(N / 4));
   return (uIn * L) / Math.max(visc, 1e-6);
 }

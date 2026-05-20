@@ -665,7 +665,7 @@ export class App {
   }
 
   private refreshReHud() {
-    const re = computeRe(this.config.uIn, this.config.visc, this.config.N);
+    const re = computeRe(this.config.uIn, this.config.visc, this.config.N, this.lbm?.charLengthCells);
     const reEl = document.getElementById('val-re');
     const reHud = document.getElementById('rd-rey');
     if (reEl) reEl.textContent = re.toFixed(0);
@@ -1226,32 +1226,42 @@ export class App {
       const aabbMin = new THREE.Vector3(-sx * 0.5, -sy * 0.5, -sz * 0.5);
       const aabbSize = new THREE.Vector3(sx, sy, sz);
       const { W, H, D } = latticeDims(this.config.N);
-      const mask = voxelizeAnyMesh(worldGeom, { W, H, D }, aabbMin, aabbSize);
-      // Frontal (y-z) silhouette area = number of (y,z) columns that have at
-      // least one OBSTACLE-only solid voxel anywhere along x. Computed BEFORE
-      // mixing in the floor so the drag denominator measures the body itself.
+      // Build pre-solid mask for the floor BEFORE voxelization. This way the
+      // flood-fill sees the floor as a wall and any fluid pocket trapped
+      // between obstacle and floor is correctly classified as interior.
+      // (Old order — flood-fill THEN floor OR — left stale fluid pockets.)
+      const floorRow = this.config.floorEnabled
+        ? Math.max(1, Math.min(H - 1, Math.round(this.config.floorYFrac * H)))
+        : 0;
+      let preSolid: Uint32Array | undefined;
+      if (floorRow > 0) {
+        preSolid = new Uint32Array(W * H * D);
+        for (let y = 0; y < floorRow; y++) {
+          for (let z = 0; z < D; z++) {
+            for (let x = 0; x < W; x++) {
+              preSolid[x + y * W + z * W * H] = 1;
+            }
+          }
+        }
+      }
+      const mask = voxelizeAnyMesh(worldGeom, { W, H, D }, aabbMin, aabbSize, preSolid);
+      // Frontal (y-z) silhouette area excluding the floor band so drag is
+      // measured on the body alone.
       let frontalCells = 0;
-      for (let y = 0; y < H; y++) {
+      for (let y = floorRow; y < H; y++) {
         for (let z = 0; z < D; z++) {
           for (let x = 0; x < W; x++) {
             if (mask[x + y * W + z * W * H] === 1) { frontalCells++; break; }
           }
         }
       }
-      // OR in the floor band — a horizontal slab of solid voxels from y=0 up
-      // to a user-set lattice row. Costs ~W·floorY·D writes; cheap.
-      if (this.config.floorEnabled) {
-        const floorRow = Math.max(1, Math.min(H - 1, Math.round(this.config.floorYFrac * H)));
-        for (let y = 0; y < floorRow; y++) {
-          for (let z = 0; z < D; z++) {
-            for (let x = 0; x < W; x++) {
-              mask[x + y * W + z * W * H] = 1;
-            }
-          }
-        }
-      }
       this.lbm.setMaskBuffer(mask);
       this.dragCalc?.setFrontalArea(frontalCells);
+      // Characteristic length ≈ √(frontal area). Drives Reynolds-number
+      // display so the HUD shows U·D/ν, not U·N/4·1/ν. For a circular
+      // frontal silhouette this equals D·√(π)/2 ≈ 0.886·D, close enough
+      // for HUD purposes regardless of shape.
+      this.lbm.charLengthCells = Math.max(1, Math.round(Math.sqrt(frontalCells)));
       worldGeom.dispose();
     }
 

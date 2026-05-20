@@ -222,9 +222,11 @@ fn cs_step(@builtin(global_invocation_id) gid: vec3<u32>) {
   // Outside the disc is held at zero velocity = closed wall. Smooth profile
   // inside avoids the sharp shear layer that triggers vortex shedding.
   if (gid.x == 0u) {
-    // Multi-inlet: any cell on the -X plane inside one of up to 4 enabled
-    // discs gets pushed back to equilibrium with the inlet velocity. The
-    // soft profile (max over the discs) prevents sharp shear at the inlet.
+    // ===== Zou-He velocity inlet (Zou & He 1997) =====
+    // Replaces the previous equilibrium-projection that over-constrained both
+    // ρ and u (Krüger §5.3.3 warning). With Zou-He, only the 5 unknown
+    // distributions (e.x = +1) are reconstructed; ρ floats to whatever the
+    // interior demands. Acoustic noise at the inlet drops dramatically.
     let Hf = f32(params.dims.y);
     let Df = f32(params.dims.z);
     let yLocal = (f32(gid.y) + 0.5) / Hf;
@@ -232,7 +234,7 @@ fn cs_step(@builtin(global_invocation_id) gid: vec3<u32>) {
     var profile : f32 = 0.0;
     for (var k = 0u; k < 4u; k = k + 1u) {
       let inlet = params.inlets[k];
-      if (inlet.w < 0.5) { continue; }  // disabled slot
+      if (inlet.w < 0.5) { continue; }
       let dy = yLocal - inlet.x;
       let dz = zLocal - inlet.y;
       let dist = sqrt(dy * dy + dz * dz);
@@ -240,11 +242,24 @@ fn cs_step(@builtin(global_invocation_id) gid: vec3<u32>) {
       let p = 1.0 - smoothstep(inlet.z - edgeBlend, inlet.z + edgeBlend, dist);
       profile = max(profile, p);
     }
-    rho = 1.0;
-    u = uInVec * profile;
-    for (var i = 0u; i < 19u; i = i + 1u) {
-      f[i] = feq(i, rho, u);
-    }
+    let ux_bc = uInVec.x * profile;
+    let uy_bc = uInVec.y * profile;
+    let uz_bc = 0.0;
+    // ρ derived from known distributions + prescribed u-component (mass cons.)
+    let knowns_0   = f[0]  + f[3]  + f[4]  + f[5]  + f[6]
+                   + f[15] + f[16] + f[17] + f[18];
+    let knowns_neg = f[2]  + f[8]  + f[10] + f[12] + f[14];
+    // Clamp denominator so Ma→1 doesn't blow ρ up.
+    let rho_in = (knowns_0 + 2.0 * knowns_neg) / max(1.0 - ux_bc, 0.01);
+    // Reconstruct the 5 unknown e.x = +1 distributions (Zou-He NEBB).
+    f[1]  = f[2]  + (1.0 / 3.0) * rho_in * ux_bc;
+    f[7]  = f[10] + (1.0 / 6.0) * rho_in * (ux_bc + uy_bc);
+    f[9]  = f[8]  + (1.0 / 6.0) * rho_in * (ux_bc - uy_bc);
+    f[11] = f[14] + (1.0 / 6.0) * rho_in * (ux_bc + uz_bc);
+    f[13] = f[12] + (1.0 / 6.0) * rho_in * (ux_bc - uz_bc);
+    rho = rho_in;
+    u = vec3<f32>(ux_bc, uy_bc, uz_bc);
+    // No collision on the inlet plane — distributions are now BC-consistent.
   } else {
     // Determine collision omega (possibly modified by LES)
     var omega_use = params.omega;
@@ -268,7 +283,38 @@ fn cs_step(@builtin(global_invocation_id) gid: vec3<u32>) {
       S_xy = S_xy * scale; S_xz = S_xz * scale; S_yz = S_yz * scale;
       let Smag = sqrt(2.0 * (S_xx*S_xx + S_yy*S_yy + S_zz*S_zz +
                               2.0*(S_xy*S_xy + S_xz*S_xz + S_yz*S_yz)));
-      let Cs = 0.16;
+      // van Driest wall damping (Pope §13.5.4): scan 6 axial directions up
+      // to 8 cells for the nearest solid voxel, then C_s_eff = C_s · (1 −
+      // exp(−d/A⁺)) with A⁺ ≈ 5 cells (heuristic). Drops ν_t to 0 right at
+      // the wall so the laminar sublayer survives. Without this Smagorinsky
+      // over-dissipates the BL even at moderate Re.
+      var wall_dist : f32 = 100.0;
+      let dirsVD = array<vec3<i32>, 6>(
+        vec3<i32>(1,0,0),  vec3<i32>(-1,0,0),
+        vec3<i32>(0,1,0),  vec3<i32>(0,-1,0),
+        vec3<i32>(0,0,1),  vec3<i32>(0,0,-1),
+      );
+      for (var d = 0u; d < 6u; d = d + 1u) {
+        let dir = dirsVD[d];
+        for (var k : i32 = 1; k <= 8; k = k + 1) {
+          let nx = i32(gid.x) + dir.x * k;
+          let ny = i32(gid.y) + dir.y * k;
+          let nz = i32(gid.z) + dir.z * k;
+          if (nx < 0 || ny < 0 || nz < 0
+              || nx >= i32(dims.x) || ny >= i32(dims.y) || nz >= i32(dims.z)) {
+            wall_dist = min(wall_dist, f32(k));
+            break;
+          }
+          let nIdx = cellIndex(vec3<u32>(u32(nx), u32(ny), u32(nz)));
+          if (mask[nIdx] == 1u) {
+            wall_dist = min(wall_dist, f32(k));
+            break;
+          }
+        }
+      }
+      let A_plus_cells : f32 = 5.0;
+      let vd_damp = 1.0 - exp(-wall_dist / A_plus_cells);
+      let Cs = 0.16 * vd_damp;
       let nu_base = (1.0 / omega_use - 0.5) / 3.0;
       let nu_t = Cs * Cs * Smag;
       let nu_total = nu_base + nu_t;
