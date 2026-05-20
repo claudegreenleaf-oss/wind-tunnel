@@ -53,11 +53,13 @@ export interface SimConfig {
 
 export function defaultConfig(): SimConfig {
   return {
-    // 96 keeps the f-buffers around 270 MB (still fits in default WebGPU
-    // limits) while putting ~17 cells across the obstacle radius — the
-    // boundary layer is now properly resolved per Pope (Turbulent Flows §1.4,
-    // wants ≥ 10 cells across the BL). Was 80 (BL marginal at r=14 cells).
-    N: 96,
+    // N=80 fits comfortably under WebGPU's default 128 MiB
+    // maxStorageBufferBindingSize (each f-buffer = 2N·N·N·19·4 bytes;
+    // at N=96 that's exactly 128 MiB and triggers allocation failure on
+    // browsers without raised limits). Boundary-layer resolution at
+    // r ≈ 14 cells is marginal; user can crank to 96 manually on a
+    // machine with raised limits.
+    N: 80,
     uIn: 0.12,        // moderate — clean streamlines without violent vortex shedding
     visc: 0.020,      // higher visc → laminar-ish flow, cleaner wake structure
     aoaDeg: 0,
