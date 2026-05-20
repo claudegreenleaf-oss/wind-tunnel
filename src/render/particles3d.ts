@@ -690,8 +690,20 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
         break;
       }
       let macros = textureSampleLevel(macrosTex, samp, uvwSub, 0.0);
-      let vel_world = macros.xyz * (aabbSize / u.dims.xyz);
-      pos = pos + vel_world * subDt;
+      let cellSize = aabbSize / u.dims.xyz;
+      let vel_world = macros.xyz * cellSize;
+      // Lagrangian-stochastic diffusive kick (Pope, "Turbulent Flows" §12.3).
+      // Real flows break tracer "strings" through molecular + turbulent
+      // diffusion; without it every particle follows its streamline forever
+      // and the inlet emission renders as a comb of beaded paths. A small
+      // isotropic random walk (~0.08 cells per substep ⇒ ~0.6 cells/frame
+      // RMS over 8 substeps) restores the natural smoke-plume look.
+      let noiseSeed = seed + f32(idx) * 0.137 + f32(k) * 1.713;
+      let nx = hash11(noiseSeed * 1.93) - 0.5;
+      let ny = hash11(noiseSeed * 1.13 + 0.7) - 0.5;
+      let nz = hash11(noiseSeed * 0.71 + 1.3) - 0.5;
+      let noise = vec3<f32>(nx, ny, nz) * cellSize * 0.16;
+      pos = pos + vel_world * subDt + noise;
     }
     if exited {
       needsReseed = true;
