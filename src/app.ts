@@ -43,6 +43,7 @@ export class App {
 
   private latticeGroup!: THREE.Group;
   private obstacleMesh: THREE.Mesh | THREE.Group | null = null;
+  private floorMesh: THREE.Mesh | null = null;
 
   private lbm: LBM3D | null = null;
   private dye: DyeField3D | null = null;
@@ -410,6 +411,24 @@ export class App {
       onTransform();
     });
 
+    // Floor controls — checkbox + height slider re-voxelize the LBM mask
+    // each time so collisions follow.
+    const floorCb = q<HTMLInputElement>('#cb-floor');
+    const floorSl = q<HTMLInputElement>('#sl-floor');
+    const floorVal = q<HTMLSpanElement>('#val-floor');
+    floorCb.checked = this.config.floorEnabled;
+    floorSl.value = String(this.config.floorYFrac);
+    floorVal.textContent = `${Math.round(this.config.floorYFrac * 100)}%`;
+    floorCb.addEventListener('change', () => {
+      this.config.floorEnabled = floorCb.checked;
+      this.applyFloor();
+    });
+    floorSl.addEventListener('input', () => {
+      this.config.floorYFrac = parseFloat(floorSl.value);
+      floorVal.textContent = `${Math.round(this.config.floorYFrac * 100)}%`;
+      if (this.config.floorEnabled) this.applyFloor();
+    });
+
     q<HTMLButtonElement>('#btn-reset').addEventListener('click', () => {
       this.lbm?.resetFlow();
       this.particles?.resetAllParticles();
@@ -654,6 +673,38 @@ export class App {
     inlet.position.set(-sx * 0.5, 0, 0);
     inlet.rotation.y = Math.PI * 0.5;
     this.latticeGroup.add(inlet);
+  }
+
+  /**
+   * Reconcile the floor mesh in the scene with config (floorEnabled,
+   * floorYFrac) and re-voxelize so the LBM mask gets the floor band.
+   * Cheap to call on every slider input.
+   */
+  private applyFloor() {
+    if (this.floorMesh) {
+      this.scene.remove(this.floorMesh);
+      this.floorMesh.geometry.dispose();
+      (this.floorMesh.material as THREE.Material).dispose();
+      this.floorMesh = null;
+    }
+    if (this.config.floorEnabled) {
+      const { sx, sy, sz } = this.latticeWorld();
+      const floorY = -sy * 0.5 + sy * this.config.floorYFrac;
+      const geom = new THREE.PlaneGeometry(sx, sz);
+      const mat = new MeshBasicNodeMaterial({
+        color: 0x4a7088,
+        transparent: true,
+        opacity: 0.35,
+        side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.set(0, floorY, 0);
+      this.scene.add(mesh);
+      this.floorMesh = mesh;
+    }
+    // Re-voxelize so the mask picks up (or drops) the floor band.
+    this.uploadObstacleToFluidSurface();
   }
 
   private disposeMeshOrGroup(obj: THREE.Mesh | THREE.Group) {
@@ -1084,9 +1135,9 @@ export class App {
       const aabbSize = new THREE.Vector3(sx, sy, sz);
       const { W, H, D } = latticeDims(this.config.N);
       const mask = voxelizeAnyMesh(worldGeom, { W, H, D }, aabbMin, aabbSize);
-      this.lbm.setMaskBuffer(mask);
       // Frontal (y-z) silhouette area = number of (y,z) columns that have at
-      // least one solid voxel anywhere along x. Feeds the drag-coeff denom.
+      // least one OBSTACLE-only solid voxel anywhere along x. Computed BEFORE
+      // mixing in the floor so the drag denominator measures the body itself.
       let frontalCells = 0;
       for (let y = 0; y < H; y++) {
         for (let z = 0; z < D; z++) {
@@ -1095,6 +1146,19 @@ export class App {
           }
         }
       }
+      // OR in the floor band — a horizontal slab of solid voxels from y=0 up
+      // to a user-set lattice row. Costs ~W·floorY·D writes; cheap.
+      if (this.config.floorEnabled) {
+        const floorRow = Math.max(1, Math.min(H - 1, Math.round(this.config.floorYFrac * H)));
+        for (let y = 0; y < floorRow; y++) {
+          for (let z = 0; z < D; z++) {
+            for (let x = 0; x < W; x++) {
+              mask[x + y * W + z * W * H] = 1;
+            }
+          }
+        }
+      }
+      this.lbm.setMaskBuffer(mask);
       this.dragCalc?.setFrontalArea(frontalCells);
       worldGeom.dispose();
     }

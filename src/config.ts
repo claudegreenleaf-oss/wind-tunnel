@@ -29,6 +29,8 @@ export interface SimConfig {
   obstacleXFrac: number;  // 0 = at inlet, 1 = at outlet; default 0.3
   inletRadius: number;    // jet disc radius as a fraction of cross-section; default 0.12
   ballSize: number;       // multiplier on the rendered particle sphere size; default 1.0
+  floorEnabled: boolean;  // when true a solid horizontal floor is added at floorYFrac
+  floorYFrac: number;     // floor height as a fraction of sy from the bottom (0 = bottom, 1 = top)
   // Visualization
   dyeAmount: number;
   // Time
@@ -54,6 +56,8 @@ export function defaultConfig(): SimConfig {
     obstacleXFrac: 0.3,
     inletRadius: 0.12,
     ballSize: 1.0,
+    floorEnabled: false,
+    floorYFrac: 0.0,
     dyeAmount: 1.0,
     paused: false,
     simSpeed: 1.0,
