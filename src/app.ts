@@ -522,13 +522,13 @@ export class App {
     // but is far more stable at moderate-to-high Re because it projects out
     // unstable higher-order non-equilibrium moments each step.
     const mrtBtn = q<HTMLButtonElement>('#btn-mrt');
-    const collisionMode = (): 'BGK' | 'TRT' | 'Regularized' => {
+    const collisionMode = (): 'BGK' | 'MRT' | 'Regularized' => {
       if (this.config.useRegularized) return 'Regularized';
-      if (this.config.useMRT) return 'TRT';
+      if (this.config.useMRT) return 'MRT';
       return 'BGK';
     };
-    const setCollisionMode = (m: 'BGK' | 'TRT' | 'Regularized') => {
-      this.config.useMRT = (m === 'TRT');
+    const setCollisionMode = (m: 'BGK' | 'MRT' | 'Regularized') => {
+      this.config.useMRT = (m === 'MRT');
       this.config.useRegularized = (m === 'Regularized');
       if (this.lbm) {
         this.lbm.useMRT = this.config.useMRT ? 1 : 0;
@@ -540,9 +540,9 @@ export class App {
     // Initialise label from current config.
     setCollisionMode(collisionMode());
     mrtBtn.addEventListener('click', () => {
-      const next: 'BGK' | 'TRT' | 'Regularized' =
-        collisionMode() === 'BGK' ? 'TRT'
-        : collisionMode() === 'TRT' ? 'Regularized'
+      const next: 'BGK' | 'MRT' | 'Regularized' =
+        collisionMode() === 'BGK' ? 'MRT'
+        : collisionMode() === 'MRT' ? 'Regularized'
         : 'BGK';
       setCollisionMode(next);
     });

@@ -276,27 +276,119 @@ fn cs_step(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     if (params.useMRT == 1u) {
-      // TRT collision (two-relaxation-time)
-      // Magic parameter Lambda = 1/4 gives correct boundary location
-      // omega_minus derived from magic relation: (1/w+ - 1/2)(1/w- - 1/2) = Lambda
-      let Lambda = 0.25;
-      let inv_wplus = 1.0 / omega_use;
-      // (inv_wplus - 0.5)(inv_wminus - 0.5) = Lambda => inv_wminus = Lambda/(inv_wplus-0.5) + 0.5
-      let inv_wminus = Lambda / (inv_wplus - 0.5) + 0.5;
-      let omega_minus = 1.0 / inv_wminus;
+      // ===== MRT collision (d'Humières 2002, 19-moment orthogonal basis) =====
+      // Each moment relaxes at its own rate: conserved quantities preserved,
+      // stress modes set physical viscosity (= omega_use), ghost modes are
+      // aggressively damped to kill the BGK τ→0.5 stability cliff that lets
+      // local cells spike ρ and explode particle velocities.
+      // Matrix coefficients and relaxation rates from d'Humières et al. 2002
+      // (Phil. Trans. Roy. Soc. A 360, 437) — textbook numerics, no IP issue.
 
-      for (var i = 0u; i < 19u; i = i + 1u) {
-        let j = opp(i);
-        let fi = f[i];
-        let fj = f[j];
-        let fi_sym  = (fi + fj) * 0.5;
-        let fi_asym = (fi - fj) * 0.5;
-        let feqi     = feq(i, rho, u);
-        let feqj     = feq(j, rho, u);
-        let feq_sym  = (feqi + feqj) * 0.5;
-        let feq_asym = (feqi - feqj) * 0.5;
-        f[i] = fi - omega_use * (fi_sym - feq_sym) - omega_minus * (fi_asym - feq_asym);
-      }
+      // ---- Forward transform f → moments (sparse) ----
+      let sf = f[1]+f[2]+f[3]+f[4]+f[5]+f[6];
+      let se = f[7]+f[8]+f[9]+f[10]+f[11]+f[12]+f[13]+f[14]+f[15]+f[16]+f[17]+f[18];
+      let sXY = f[7]+f[8]+f[9]+f[10];
+      let sXZ = f[11]+f[12]+f[13]+f[14];
+      let sYZ = f[15]+f[16]+f[17]+f[18];
+      var m0  = f[0] + sf + se;
+      var m1  = -30.0*f[0] - 11.0*sf + 8.0*se;
+      var m2  = 12.0*f[0] - 4.0*sf + se;
+      var m3  = f[1]-f[2] + f[7]-f[8]+f[9]-f[10] + f[11]-f[12]+f[13]-f[14];
+      var m4  = -4.0*(f[1]-f[2]) + f[7]-f[8]+f[9]-f[10] + f[11]-f[12]+f[13]-f[14];
+      var m5  = f[3]-f[4] + f[7]+f[8]-f[9]-f[10] + f[15]-f[16]+f[17]-f[18];
+      var m6  = -4.0*(f[3]-f[4]) + f[7]+f[8]-f[9]-f[10] + f[15]-f[16]+f[17]-f[18];
+      var m7  = f[5]-f[6] + f[11]+f[12]-f[13]-f[14] + f[15]+f[16]-f[17]-f[18];
+      var m8  = -4.0*(f[5]-f[6]) + f[11]+f[12]-f[13]-f[14] + f[15]+f[16]-f[17]-f[18];
+      var m9  = 2.0*(f[1]+f[2]) - (f[3]+f[4]) - (f[5]+f[6]) + sXY + sXZ - 2.0*sYZ;
+      var m10 = -4.0*(f[1]+f[2]) + 2.0*(f[3]+f[4]) + 2.0*(f[5]+f[6]) + sXY + sXZ - 2.0*sYZ;
+      var m11 = (f[3]+f[4]) - (f[5]+f[6]) + sXY - sXZ;
+      var m12 = -2.0*(f[3]+f[4]) + 2.0*(f[5]+f[6]) + sXY - sXZ;
+      var m13 = f[7]-f[8]-f[9]+f[10];
+      var m14 = f[15]-f[16]-f[17]+f[18];
+      var m15 = f[11]-f[12]-f[13]+f[14];
+      var m16 = f[7]-f[8]+f[9]-f[10] - f[11]+f[12]-f[13]+f[14];
+      var m17 = -f[7]-f[8]+f[9]+f[10] + f[15]-f[16]+f[17]-f[18];
+      var m18 = f[11]+f[12]-f[13]-f[14] - f[15]-f[16]+f[17]+f[18];
+
+      // ---- Equilibrium moments meq(ρ, u) ----
+      let u2 = dot(u, u);
+      let meq0  = rho;
+      let meq1  = -11.0*rho + 19.0*rho*u2;
+      let meq2  = 3.0*rho - 5.5*rho*u2;
+      let meq3  = rho*u.x;
+      let meq4  = -2.0/3.0 * rho*u.x;
+      let meq5  = rho*u.y;
+      let meq6  = -2.0/3.0 * rho*u.y;
+      let meq7  = rho*u.z;
+      let meq8  = -2.0/3.0 * rho*u.z;
+      let meq9  = rho*(2.0*u.x*u.x - u.y*u.y - u.z*u.z);
+      let meq10 = -0.5*meq9;
+      let meq11 = rho*(u.y*u.y - u.z*u.z);
+      let meq12 = -0.5*meq11;
+      let meq13 = rho*u.x*u.y;
+      let meq14 = rho*u.y*u.z;
+      let meq15 = rho*u.x*u.z;
+      // meq16..18 = 0 (ghost modes)
+
+      // ---- Relaxation: m* = m − S·(m − meq). Conserved moments (0,3,5,7) have s=0. ----
+      let s_nu = omega_use;
+      m1  = m1  - 1.19  * (m1  - meq1);
+      m2  = m2  - 1.4   * (m2  - meq2);
+      m4  = m4  - 1.2   * (m4  - meq4);
+      m6  = m6  - 1.2   * (m6  - meq6);
+      m8  = m8  - 1.2   * (m8  - meq8);
+      m9  = m9  - s_nu  * (m9  - meq9);
+      m10 = m10 - 1.4   * (m10 - meq10);
+      m11 = m11 - s_nu  * (m11 - meq11);
+      m12 = m12 - 1.4   * (m12 - meq12);
+      m13 = m13 - s_nu  * (m13 - meq13);
+      m14 = m14 - s_nu  * (m14 - meq14);
+      m15 = m15 - s_nu  * (m15 - meq15);
+      m16 = m16 - 1.98  * m16;
+      m17 = m17 - 1.98  * m17;
+      m18 = m18 - 1.98  * m18;
+
+      // ---- Pre-scale by 1/||row||² (M⁻¹ = Mᵀ / diag(M·Mᵀ)) ----
+      let s0  = m0  / 19.0;
+      let s1  = m1  / 2394.0;
+      let s2  = m2  / 252.0;
+      let s3  = m3  / 10.0;
+      let s4  = m4  / 40.0;
+      let s5  = m5  / 10.0;
+      let s6  = m6  / 40.0;
+      let s7  = m7  / 10.0;
+      let s8  = m8  / 40.0;
+      let s9  = m9  / 36.0;
+      let s10 = m10 / 72.0;
+      let s11 = m11 / 12.0;
+      let s12 = m12 / 24.0;
+      let s13 = m13 / 4.0;
+      let s14 = m14 / 4.0;
+      let s15 = m15 / 4.0;
+      let s16 = m16 / 8.0;
+      let s17 = m17 / 8.0;
+      let s18 = m18 / 8.0;
+
+      // ---- Inverse transform back to f ----
+      f[0]  = s0 - 30.0*s1 + 12.0*s2;
+      f[1]  = s0 - 11.0*s1 -  4.0*s2 + s3 - 4.0*s4 + 2.0*s9 - 4.0*s10;
+      f[2]  = s0 - 11.0*s1 -  4.0*s2 - s3 + 4.0*s4 + 2.0*s9 - 4.0*s10;
+      f[3]  = s0 - 11.0*s1 -  4.0*s2 + s5 - 4.0*s6 - s9 + 2.0*s10 + s11 - 2.0*s12;
+      f[4]  = s0 - 11.0*s1 -  4.0*s2 - s5 + 4.0*s6 - s9 + 2.0*s10 + s11 - 2.0*s12;
+      f[5]  = s0 - 11.0*s1 -  4.0*s2 + s7 - 4.0*s8 - s9 + 2.0*s10 - s11 + 2.0*s12;
+      f[6]  = s0 - 11.0*s1 -  4.0*s2 - s7 + 4.0*s8 - s9 + 2.0*s10 - s11 + 2.0*s12;
+      f[7]  = s0 + 8.0*s1 + s2 + s3 + s4 + s5 + s6 + s9 + s10 + s11 + s12 + s13 + s16 - s17;
+      f[8]  = s0 + 8.0*s1 + s2 - s3 - s4 + s5 + s6 + s9 + s10 + s11 + s12 - s13 - s16 - s17;
+      f[9]  = s0 + 8.0*s1 + s2 + s3 + s4 - s5 - s6 + s9 + s10 + s11 + s12 - s13 + s16 + s17;
+      f[10] = s0 + 8.0*s1 + s2 - s3 - s4 - s5 - s6 + s9 + s10 + s11 + s12 + s13 - s16 + s17;
+      f[11] = s0 + 8.0*s1 + s2 + s3 + s4 + s7 + s8 + s9 + s10 - s11 - s12 + s15 - s16 + s18;
+      f[12] = s0 + 8.0*s1 + s2 - s3 - s4 + s7 + s8 + s9 + s10 - s11 - s12 - s15 + s16 + s18;
+      f[13] = s0 + 8.0*s1 + s2 + s3 + s4 - s7 - s8 + s9 + s10 - s11 - s12 - s15 - s16 - s18;
+      f[14] = s0 + 8.0*s1 + s2 - s3 - s4 - s7 - s8 + s9 + s10 - s11 - s12 + s15 + s16 - s18;
+      f[15] = s0 + 8.0*s1 + s2 + s5 + s6 + s7 + s8 - 2.0*s9 - 2.0*s10 + s14 + s17 - s18;
+      f[16] = s0 + 8.0*s1 + s2 - s5 - s6 + s7 + s8 - 2.0*s9 - 2.0*s10 - s14 - s17 - s18;
+      f[17] = s0 + 8.0*s1 + s2 + s5 + s6 - s7 - s8 - 2.0*s9 - 2.0*s10 - s14 + s17 + s18;
+      f[18] = s0 + 8.0*s1 + s2 - s5 - s6 - s7 - s8 - 2.0*s9 - 2.0*s10 + s14 - s17 + s18;
     } else if (params.useRegularized == 1u) {
       // ===== Regularized BGK (Latt & Chopard 2006) =====
       // Ported from MarcosAsh/Lattice_Fluid_Dynamics (MIT) `lbm_collide.comp:488-545`.
