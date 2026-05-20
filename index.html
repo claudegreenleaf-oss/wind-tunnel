@@ -34,10 +34,25 @@
             <select id="shape-select">
               <optgroup label="Primitives">
                 <option value="sphere">Sphere</option>
+                <option value="cube">Cube</option>
                 <option value="cylinder">Cylinder</option>
                 <option value="cone">Cone</option>
-                <option value="wing">Wing (NACA 0012)</option>
+                <option value="pyramid">Pyramid</option>
+                <option value="torus">Torus</option>
+                <option value="capsule">Capsule</option>
+                <option value="tetrahedron">Tetrahedron</option>
+                <option value="octahedron">Octahedron</option>
+                <option value="dodecahedron">Dodecahedron</option>
+                <option value="icosahedron">Icosahedron</option>
                 <option value="teapot">Teapot</option>
+              </optgroup>
+              <optgroup label="Airfoils">
+                <option value="naca-0006">NACA 0006 (thin sym.)</option>
+                <option value="naca-0012">NACA 0012 (sym.)</option>
+                <option value="naca-0024">NACA 0024 (thick sym.)</option>
+                <option value="naca-2412">NACA 2412 (cambered)</option>
+                <option value="naca-4412">NACA 4412 (high lift)</option>
+                <option value="naca-6412">NACA 6412 (max camber)</option>
               </optgroup>
               <!-- Remote .glb models are injected here at runtime from modelRegistry.ts -->
               <optgroup label="Models" id="shape-remote-group"></optgroup>
@@ -188,7 +203,7 @@
     </div>
 
     <div id="drop-overlay" hidden>
-      <span>Drop .glb or .obj to voxelize as obstacle</span>
+      <span>Drop .glb, .obj or .stl to voxelize as obstacle</span>
     </div>
 
     <!-- Floating Cd overlay (top-left). Mirrors the panel readout but big. -->

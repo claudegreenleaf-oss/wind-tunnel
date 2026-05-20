@@ -5,6 +5,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TeapotGeometry } from 'three/addons/geometries/TeapotGeometry.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { voxelizeAnyMesh } from './obstacles/voxelizeAnyMesh';
 import { REMOTE_MODELS, getRemoteModel, type RemoteModel } from './obstacles/modelRegistry';
@@ -309,12 +310,35 @@ export class App {
     });
 
     const shapeSelect = q<HTMLSelectElement>('#shape-select');
-    const remoteGroup = q<HTMLOptGroupElement>('#shape-remote-group');
+    const remotePlaceholder = q<HTMLOptGroupElement>('#shape-remote-group');
+    // Replace the single "Models" optgroup with one optgroup per category so
+    // the dropdown stays browsable as the catalogue grows.
+    const customOption = shapeSelect.querySelector('option[value="custom"]');
+    const byCategory = new Map<string, typeof REMOTE_MODELS>();
     for (const m of REMOTE_MODELS) {
-      const opt = document.createElement('option');
-      opt.value = m.id;
-      opt.textContent = m.name;
-      remoteGroup.appendChild(opt);
+      const c = (m as any).category ?? 'misc';
+      const arr = byCategory.get(c) ?? [];
+      arr.push(m);
+      byCategory.set(c, arr);
+    }
+    const categoryLabel: Record<string, string> = {
+      aircraft: 'Aircraft', vehicles: 'Vehicles', characters: 'Characters',
+      animals: 'Animals', objects: 'Objects', misc: 'Misc',
+    };
+    const categoryOrder = ['aircraft', 'vehicles', 'characters', 'animals', 'objects', 'misc'];
+    remotePlaceholder.remove();
+    for (const cat of categoryOrder) {
+      const list = byCategory.get(cat);
+      if (!list) continue;
+      const group = document.createElement('optgroup');
+      group.label = categoryLabel[cat] ?? cat;
+      for (const m of list) {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.name;
+        group.appendChild(opt);
+      }
+      shapeSelect.insertBefore(group, customOption);
     }
     shapeSelect.value = this.config.shapeId;
     shapeSelect.addEventListener('change', () => {
@@ -796,19 +820,50 @@ export class App {
         this.obstacleMesh = mesh;
         break;
       }
-      case 'wing': {
+      case 'wing':
+      case 'naca-0006':
+      case 'naca-0012':
+      case 'naca-0024':
+      case 'naca-2412':
+      case 'naca-4412':
+      case 'naca-6412': {
+        // 4-digit NACA airfoil profile: m = max camber (%c), p = position
+        // of max camber (10ths of c), tt = thickness (%c). "wing" stays as
+        // 0012 for backward-compat; the rest decode the id.
+        let m = 0, p = 0.5, tt = 0.12;
+        if (this.config.shapeId.startsWith('naca-')) {
+          const d = this.config.shapeId.slice(5);
+          m  = parseInt(d[0]!, 10) / 100;
+          p  = parseInt(d[1]!, 10) / 10;
+          tt = parseInt(d.slice(2), 10) / 100;
+          if (p === 0) p = 0.5;
+        }
         const shape = new THREE.Shape();
-        const pts = 32;
+        const pts = 48;
         const topPts: THREE.Vector2[] = [];
         const botPts: THREE.Vector2[] = [];
         for (let i = 0; i <= pts; i++) {
           const xc = i / pts;
           const sq = Math.sqrt(Math.max(0, xc));
-          const yt = 5 * 0.12 * (0.2969 * sq - 0.126 * xc - 0.3516 * xc * xc + 0.2843 * xc * xc * xc - 0.1015 * xc * xc * xc * xc);
-          const px = (xc - 0.5) * 2 * halfLen;
-          const py = yt * halfLen * 0.5;
-          topPts.push(new THREE.Vector2(px, py));
-          botPts.push(new THREE.Vector2(px, -py));
+          const yt = 5 * tt * (0.2969 * sq - 0.126 * xc - 0.3516 * xc * xc + 0.2843 * xc * xc * xc - 0.1015 * xc * xc * xc * xc);
+          let yc = 0, dyc_dx = 0;
+          if (m > 0) {
+            if (xc < p) {
+              yc = (m / (p * p)) * (2 * p * xc - xc * xc);
+              dyc_dx = (2 * m / (p * p)) * (p - xc);
+            } else {
+              yc = (m / ((1 - p) * (1 - p))) * ((1 - 2 * p) + 2 * p * xc - xc * xc);
+              dyc_dx = (2 * m / ((1 - p) * (1 - p))) * (p - xc);
+            }
+          }
+          const theta = Math.atan(dyc_dx);
+          const xu = xc - yt * Math.sin(theta);
+          const yu = yc + yt * Math.cos(theta);
+          const xl = xc + yt * Math.sin(theta);
+          const yl = yc - yt * Math.cos(theta);
+          const sxc = halfLen * 2;
+          topPts.push(new THREE.Vector2((xu - 0.5) * sxc, yu * sxc * 0.5));
+          botPts.push(new THREE.Vector2((xl - 0.5) * sxc, yl * sxc * 0.5));
         }
         shape.moveTo(topPts[0].x, topPts[0].y);
         for (let i = 1; i < topPts.length; i++) shape.lineTo(topPts[i].x, topPts[i].y);
@@ -819,6 +874,50 @@ export class App {
         geom.translate(0, 0, -halfLen * 1.5);
         const mesh = new THREE.Mesh(geom, this.makeMat());
         this.obstacleMesh = mesh;
+        break;
+      }
+      case 'cube': {
+        const geom = new THREE.BoxGeometry(r * 1.4, r * 1.4, r * 1.4);
+        this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
+        break;
+      }
+      case 'pyramid': {
+        const geom = new THREE.ConeGeometry(r * 1.2, r * 1.8, 4);
+        const mesh = new THREE.Mesh(geom, this.makeMat());
+        mesh.rotation.z = Math.PI / 2;
+        this.obstacleMesh = mesh;
+        break;
+      }
+      case 'torus': {
+        const geom = new THREE.TorusGeometry(r, r * 0.35, 24, 48);
+        this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
+        break;
+      }
+      case 'capsule': {
+        const geom = new THREE.CapsuleGeometry(r * 0.55, r * 1.5, 12, 24);
+        const mesh = new THREE.Mesh(geom, this.makeMat());
+        mesh.rotation.z = Math.PI / 2;
+        this.obstacleMesh = mesh;
+        break;
+      }
+      case 'icosahedron': {
+        const geom = new THREE.IcosahedronGeometry(r, 0);
+        this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
+        break;
+      }
+      case 'octahedron': {
+        const geom = new THREE.OctahedronGeometry(r, 0);
+        this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
+        break;
+      }
+      case 'dodecahedron': {
+        const geom = new THREE.DodecahedronGeometry(r, 0);
+        this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
+        break;
+      }
+      case 'tetrahedron': {
+        const geom = new THREE.TetrahedronGeometry(r * 1.2, 0);
+        this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
         break;
       }
       case 'teapot': {
@@ -1024,8 +1123,8 @@ export class App {
       if (!file) return;
 
       const ext = file.name.split('.').pop()?.toLowerCase();
-      if (ext !== 'glb' && ext !== 'obj') {
-        showToast('Only .glb and .obj files are supported');
+      if (ext !== 'glb' && ext !== 'obj' && ext !== 'stl') {
+        showToast('Supported formats: .glb, .obj, .stl');
         return;
       }
 
@@ -1045,6 +1144,12 @@ export class App {
               geometry = child.geometry.clone();
             }
           });
+        } else if (ext === 'stl') {
+          // STLLoader.parse accepts ArrayBuffer (binary STL) or string (ASCII STL).
+          // We hand it the binary buffer and let it detect which form it is.
+          const loader = new STLLoader();
+          const buf = await file.arrayBuffer();
+          geometry = loader.parse(buf);
         } else {
           const loader = new OBJLoader();
           const text = await file.text();
