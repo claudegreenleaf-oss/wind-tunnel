@@ -23,6 +23,7 @@ import { voxelizeMesh } from './obstacles/upload';
 import { showToast } from './ui/toast';
 import INJECT_WGSL from './sim/inject.wgsl?raw';
 import { runAllPhysicsTests } from './tests/physicsTests';
+import { StreamlineRenderer } from './render/streamlines';
 
 /**
  * Top-level orchestrator (3D).
@@ -51,8 +52,12 @@ export class App {
   private volumeRenderer: VolumeRenderer | null = null;
   private particles: ParticleSystem | null = null;
   private fluidSurface: FluidSurfaceRenderer | null = null;
+  private streamlines: StreamlineRenderer | null = null;
   private sliceViewer: SliceViewer | null = null;
   private dragCalc: DragCoeffCalc | null = null;
+
+  // Active view mode — set by tab bar clicks, consumed in render loop.
+  private viewMode: 'particles' | 'streamlines' | 'volume' | 'slice' = 'particles';
   /** ms timestamp of the last drag-coefficient compute dispatch. */
   private lastDragComputeMs = 0;
   private sliceActive = false;
@@ -185,7 +190,18 @@ export class App {
       this.fluidSurface.setMacrosTexture(this.lbm.macrosTextureView);
       this.fluidSurface.setMaskBuffer(this.lbm.maskBuffer, latticeDims(this.config.N));
 
-      // Picture-in-picture slice viewer (its own canvas in the corner).
+      // Streamline renderer — RK4-advected ribbons through the velocity field.
+      this.streamlines = new StreamlineRenderer(
+        device,
+        canvasFormat,
+        () => ctx.getCurrentTexture().createView(),
+        () => { const t = ctx.getCurrentTexture(); return [t.width, t.height]; },
+      );
+      this.streamlines.setMacrosTexture(this.lbm.macrosTextureView);
+
+      // Slice viewer — uses the full-viewport canvas when slice tab is active,
+      // or the PiP canvas when another tab shows it as an overlay.
+      // We prefer the full-viewport canvas; the PiP canvas is separate.
       const sliceCanvas = document.getElementById('slice-canvas') as HTMLCanvasElement | null;
       if (sliceCanvas) {
         this.sliceViewer = new SliceViewer(device, sliceCanvas);
@@ -636,7 +652,11 @@ export class App {
       slicePosVal.textContent = parseFloat(slicePos.value).toFixed(2);
       const axisLbl = sliceAxis.value.toUpperCase();
       const fieldLbl = sliceField.value[0].toUpperCase() + sliceField.value.slice(1);
-      sliceTitle.textContent = `${axisLbl}-slice · ${fieldLbl}`;
+      const label = `${axisLbl}-slice · ${fieldLbl}`;
+      sliceTitle.textContent = label;
+      // Also update the full-viewport slice header labels
+      const vpTitle = document.getElementById('slice-vp-title');
+      if (vpTitle) vpTitle.textContent = label;
       const ranges: Record<string, [string, string]> = {
         velocity: ['0', '0.10'],
         pressure: ['0', '0.04'],
@@ -645,6 +665,10 @@ export class App {
       const [lo, hi] = ranges[sliceField.value];
       sliceLegendLo.textContent = lo;
       sliceLegendHi.textContent = hi;
+      const vpLo = document.getElementById('slice-vp-legend-lo');
+      const vpHi = document.getElementById('slice-vp-legend-hi');
+      if (vpLo) vpLo.textContent = lo;
+      if (vpHi) vpHi.textContent = hi;
     };
 
     const sliceMaskCb = q<HTMLInputElement>('#cb-slice-mask');
@@ -664,9 +688,14 @@ export class App {
       this.sliceActive = !this.sliceActive;
       sliceBtn.textContent = this.sliceActive ? 'Slice: On' : 'Slice: Off';
       sliceBtn.classList.toggle('active', this.sliceActive);
-      if (sliceOverlay) {
-        if (this.sliceActive) sliceOverlay.removeAttribute('hidden');
-        else sliceOverlay.setAttribute('hidden', '');
+      // When the slice button is toggled on, switch to the Slice tab so the
+      // full-viewport canvas is visible. When toggled off, revert to Particles.
+      const sliceTab = document.querySelector<HTMLButtonElement>('#tab-bar .tab[data-mode="slice"]');
+      const particlesTab = document.querySelector<HTMLButtonElement>('#tab-bar .tab[data-mode="particles"]');
+      if (this.sliceActive) {
+        sliceTab?.click();
+      } else {
+        particlesTab?.click();
       }
       if (this.sliceIndicator) this.sliceIndicator.visible = this.sliceActive;
     });
@@ -675,7 +704,64 @@ export class App {
     slicePos.addEventListener('input', pushSliceConfig);
     pushSliceConfig();
 
+    this.wireTabBar();
     this.refreshReHud();
+  }
+
+  /** Wire the top tab bar: pip animation + view-mode switching. */
+  private wireTabBar() {
+    const tabs = document.querySelectorAll<HTMLButtonElement>('#tab-bar .tab');
+    const pip  = document.getElementById('tab-pip');
+    const sliceFullVp = document.getElementById('slice-fullvp');
+
+    const movePip = (activeTab: HTMLButtonElement) => {
+      if (!pip) return;
+      const bar = document.getElementById('tab-bar');
+      if (!bar) return;
+      const barRect = bar.getBoundingClientRect();
+      const tabRect = activeTab.getBoundingClientRect();
+      pip.style.left  = (tabRect.left - barRect.left) + 'px';
+      pip.style.width = tabRect.width + 'px';
+    };
+
+    const setMode = (mode: 'particles' | 'streamlines' | 'volume' | 'slice') => {
+      this.viewMode = mode;
+
+      // Toggle full-viewport slice canvas visibility
+      if (sliceFullVp) {
+        if (mode === 'slice') sliceFullVp.removeAttribute('hidden');
+        else sliceFullVp.setAttribute('hidden', '');
+      }
+
+      // Particles: reset streamlines when switching back so they start fresh
+      if (mode === 'streamlines' && this.streamlines) {
+        const { sx, sy, sz } = this.latticeWorld();
+        const aabbMin = new THREE.Vector3(-sx * 0.5, -sy * 0.5, -sz * 0.5);
+        const aabbMax = new THREE.Vector3( sx * 0.5,  sy * 0.5,  sz * 0.5);
+        this.streamlines.resetSeeds(aabbMin, aabbMax);
+      }
+    };
+
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        tabs.forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        movePip(tab);
+        setMode(tab.dataset.mode as 'particles' | 'streamlines' | 'volume' | 'slice');
+      });
+    });
+
+    // Initialise pip on first active tab
+    const initialActive = document.querySelector<HTMLButtonElement>('#tab-bar .tab.active');
+    if (initialActive) {
+      // Defer one frame so layout is complete
+      requestAnimationFrame(() => movePip(initialActive));
+    }
+    // Keep pip in sync after window resize (viewport width changes)
+    window.addEventListener('resize', () => {
+      const active = document.querySelector<HTMLButtonElement>('#tab-bar .tab.active');
+      if (active) movePip(active);
+    });
   }
 
   private applyResolution() {
@@ -694,6 +780,7 @@ export class App {
     this.particles?.setMacrosTexture(this.lbm.macrosTextureView, this.lbm.maskBuffer);
     this.fluidSurface?.setMacrosTexture(this.lbm.macrosTextureView);
     this.fluidSurface?.setMaskBuffer(this.lbm.maskBuffer, { W, H, D });
+    this.streamlines?.setMacrosTexture(this.lbm.macrosTextureView);
     this.sliceViewer?.setMacros(this.lbm.macrosTextureView);
     this.dragCalc?.setInputs(this.lbm.macrosTextureView, this.lbm.maskBuffer, { W, H, D });
     this.rebuildLatticeBox();
@@ -1460,43 +1547,51 @@ export class App {
       return;
     }
 
-    // SSFR fluid surface: advect particles via LBM field, then run depth →
-    // blur → thickness → blur → composite to produce a "real water surface"
-    // look. Order: Three.js (cleared) → fluid surface (alpha-over).
-    if (this.lbm && this.particles && this.fluidSurface) {
+    // ── Per-frame GPU rendering, branched by active view mode ───────────────
+    if (this.lbm) {
       this.camera.updateMatrixWorld();
-      const view = this.camera.matrixWorldInverse;
-      const proj = this.camera.projectionMatrix;
-      const camPos = this.camera.position;
+      const view    = this.camera.matrixWorldInverse;
+      const proj    = this.camera.projectionMatrix;
+      const camPos  = this.camera.position;
       const { sx, sy, sz } = this.latticeWorld();
       const aabbMin = new THREE.Vector3(-sx * 0.5, -sy * 0.5, -sz * 0.5);
-      const aabbMax = new THREE.Vector3(sx * 0.5, sy * 0.5, sz * 0.5);
+      const aabbMax = new THREE.Vector3( sx * 0.5,  sy * 0.5,  sz * 0.5);
       const { W, H, D } = latticeDims(this.config.N);
 
-      // Pause gates the whole sim — particles included. Scale particle dt
-      // by simSpeed so slo-mo / the sim-speed slider also visually slow
-      // (or speed up) the particle motion, not just the underlying LBM.
-      if (!this.config.paused) {
-        const dt = 6.0 * this.config.simSpeed;
-        this.particles.advectOnly(view, proj, camPos, aabbMin, aabbMax, { W, H, D }, { dt });
+      if (this.viewMode === 'particles' && this.particles && this.fluidSurface) {
+        // ── Particles (default) ── sphere impostors via FluidSurfaceRenderer
+        if (!this.config.paused) {
+          const dt = 6.0 * this.config.simSpeed;
+          this.particles.advectOnly(view, proj, camPos, aabbMin, aabbMax, { W, H, D }, { dt });
+        }
+        const sphereSize = (sx / 170) * this.config.ballSize;
+        const t = performance.now() * 0.001;
+        if (this.obstacleMesh) {
+          this.obstacleMesh.updateMatrixWorld();
+          this.fluidSurface.setObstacleTransform(view, proj, this.obstacleMesh.matrixWorld);
+        }
+        this.fluidSurface.renderRawSpheres(view, proj, sphereSize, t, aabbMin, aabbMax);
+
+      } else if (this.viewMode === 'streamlines' && this.streamlines) {
+        // ── Streamlines ── RK4 ribbons
+        const slDt = this.config.paused ? 0 : 0.008 * this.config.simSpeed;
+        this.streamlines.render(view, proj, aabbMin, aabbMax, { W, H, D }, slDt);
+
+      } else if (this.viewMode === 'volume' && this.volumeRenderer) {
+        // ── Volumetric heatmap ──
+        this.volumeRenderer.render(view, proj, camPos, aabbMin, aabbMax, 48);
+
+      } else if (this.viewMode === 'slice') {
+        // ── Full-viewport slice ──
+        if (this.sliceViewer) {
+          this.sliceViewer.render(aabbMin, aabbMax, { W, H, D });
+        }
       }
-      const sphereSize = (sx / 170) * this.config.ballSize;
-      const t = performance.now() * 0.001;
 
-      // Push the obstacle's current world matrix to the obstacle pipeline so
-      // the mesh draws at the right place.
-      if (this.obstacleMesh) {
-        this.obstacleMesh.updateMatrixWorld();
-        this.fluidSurface.setObstacleTransform(view, proj, this.obstacleMesh.matrixWorld);
-      }
-
-      this.fluidSurface.renderRawSpheres(view, proj, sphereSize, t, aabbMin, aabbMax);
-
-      // Picture-in-picture slice viewer.
-      if (this.sliceActive && this.sliceViewer) {
+      // PiP slice overlay in non-slice modes (only when btn-slice is active)
+      if (this.viewMode !== 'slice' && this.sliceActive && this.sliceViewer) {
         this.sliceViewer.render(aabbMin, aabbMax, { W, H, D });
       }
-
     }
 
     const now = performance.now();

@@ -7,12 +7,32 @@
     <meta name="theme-color" content="#07070b" />
     <title>Wind Tunnel 3D · GPU Fluid Simulator</title>
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   </head>
   <body>
     <div id="app">
-      <canvas id="view"></canvas>
+      <div id="viewport">
+        <!-- Top tab bar -->
+        <nav id="tab-bar">
+          <button class="tab active" data-mode="particles">Particles</button>
+          <button class="tab" data-mode="streamlines">Streamlines</button>
+          <button class="tab" data-mode="volume">Volumetric</button>
+          <button class="tab" data-mode="slice">Slice</button>
+          <div class="tab-pip" id="tab-pip"></div>
+        </nav>
 
-      <aside id="panel" aria-label="Controls">
+        <canvas id="view"></canvas>
+      </div>
+
+      <!-- Drag handle (between viewport and panel) -->
+      <div id="panel-resize-handle"></div>
+
+      <aside id="panel">
+        <!-- Collapse button on the panel's outer left edge -->
+        <button id="panel-collapse-btn" title="Collapse panel">&#x2039;</button>
+
         <header>
           <h1>Wind Tunnel</h1>
           <div class="sub">WebGPU · D3Q19 · 3D LBM</div>
@@ -226,6 +246,9 @@
       </aside>
     </div>
 
+    <!-- Panel collapsed chip (shown when panel is collapsed) -->
+    <button id="panel-reopen-btn" hidden>&#x203A; Panel</button>
+
     <div id="drop-overlay" hidden>
       <span>Drop .glb, .obj or .stl to voxelize as obstacle</span>
     </div>
@@ -237,55 +260,141 @@
       <div class="cd-sub" id="cd-overlay-sub">Cd · live</div>
     </div>
 
-    <!-- Picture-in-picture slice viewer (hidden by default) -->
+    <!-- Full-viewport slice canvas (shown when slice tab is active) -->
+    <div id="slice-fullvp" hidden>
+      <div class="slice-vp-header">
+        <span id="slice-vp-title">Slice</span>
+        <div class="slice-vp-legend">
+          <span class="legend-lo" id="slice-vp-legend-lo">low</span>
+          <span class="legend-bar"></span>
+          <span class="legend-hi" id="slice-vp-legend-hi">high</span>
+        </div>
+      </div>
+      <canvas id="slice-canvas" width="320" height="320"></canvas>
+    </div>
+
+    <!-- Picture-in-picture slice viewer (hidden by default, used in non-slice tabs) -->
+    <!-- Note: renders to the same slice-canvas as full-viewport mode -->
     <div id="slice-overlay" hidden>
       <div class="slice-title">
         <span id="slice-title-text">Slice</span>
       </div>
-      <canvas id="slice-canvas" width="320" height="320"></canvas>
+      <canvas id="slice-canvas-pip" width="320" height="320" style="display:none"></canvas>
       <div class="slice-legend">
         <span class="legend-lo" id="slice-legend-lo">low</span>
         <span class="legend-bar"></span>
         <span class="legend-hi" id="slice-legend-hi">high</span>
       </div>
     </div>
+
     <style>
-      #drop-overlay { position:fixed; inset:0; pointer-events:auto; cursor:copy; backdrop-filter:blur(4px); background:rgba(11,180,120,0.15); display:flex; align-items:center; justify-content:center; z-index:100; font-size:1.4rem; color:#6bf0d6; font-family:sans-serif; letter-spacing:0.05em; }
+      /* ── Drop overlay ── */
+      #drop-overlay { position:fixed; inset:0; pointer-events:auto; cursor:copy; backdrop-filter:blur(4px); background:rgba(11,180,120,0.12); display:flex; align-items:center; justify-content:center; z-index:100; font-size:1.4rem; color:var(--accent); font-family:var(--mono); letter-spacing:0.05em; }
       #drop-overlay[hidden] { display:none !important; }
 
-      #cd-overlay { position:fixed; left:24px; top:24px; z-index:50; background:rgba(11,12,18,0.78); border:1px solid #1f1f2c; border-radius:10px; padding:12px 18px; font-family:sans-serif; color:#a3a8b8; backdrop-filter:blur(8px); box-shadow:0 4px 18px rgba(0,0,0,0.5); pointer-events:none; min-width:140px; }
-      #cd-overlay .cd-label { font-size:0.7rem; letter-spacing:0.12em; text-transform:uppercase; color:#6bf0d6; margin-bottom:4px; }
-      #cd-overlay .cd-value { font-size:2.2rem; font-weight:600; color:#e7e9f0; line-height:1; font-variant-numeric:tabular-nums; }
-      #cd-overlay .cd-sub { font-size:0.68rem; letter-spacing:0.08em; color:#5b6076; margin-top:4px; }
-      #slice-overlay { position:fixed; left:24px; bottom:24px; z-index:50; background:rgba(11,12,18,0.78); border:1px solid #1f1f2c; border-radius:10px; padding:10px; font-family:sans-serif; color:#a3a8b8; backdrop-filter:blur(8px); box-shadow:0 4px 18px rgba(0,0,0,0.5); }
+      /* ── Cd overlay ── */
+      #cd-overlay { position:fixed; left:24px; top:72px; z-index:50; background:rgba(8,9,14,0.82); border:1px solid rgba(107,240,214,0.18); border-radius:8px; padding:12px 18px; font-family:var(--mono); color:var(--fg-dim); backdrop-filter:blur(10px); box-shadow:0 4px 24px rgba(0,0,0,0.6); pointer-events:none; min-width:140px; }
+      #cd-overlay .cd-label { font-size:0.68rem; letter-spacing:0.14em; text-transform:uppercase; color:var(--accent); margin-bottom:6px; font-family:var(--sans); }
+      #cd-overlay .cd-value { font-size:2.4rem; font-weight:600; color:var(--fg); line-height:1; font-variant-numeric:tabular-nums; letter-spacing:-0.02em; }
+      #cd-overlay .cd-sub { font-size:0.66rem; letter-spacing:0.08em; color:var(--fg-muted); margin-top:5px; }
+
+      /* ── PiP Slice overlay (non-slice tabs) ── */
+      #slice-overlay { position:fixed; left:24px; bottom:24px; z-index:50; background:rgba(8,9,14,0.82); border:1px solid rgba(107,240,214,0.14); border-radius:8px; padding:10px; font-family:var(--mono); color:var(--fg-dim); backdrop-filter:blur(10px); box-shadow:0 4px 24px rgba(0,0,0,0.6); }
       #slice-overlay[hidden] { display:none !important; }
-      #slice-overlay .slice-title { font-size:0.72rem; letter-spacing:0.12em; text-transform:uppercase; margin-bottom:6px; color:#6bf0d6; }
-      #slice-overlay canvas { display:block; border-radius:6px; image-rendering:pixelated; background:#000; }
-      #slice-overlay .slice-legend { display:flex; align-items:center; justify-content:space-between; margin-top:6px; font-size:0.66rem; letter-spacing:0.06em; }
-      #slice-overlay .legend-bar { flex:1; height:8px; margin:0 8px; border-radius:4px; background: linear-gradient(to right, #1a0b3a, #1a66f2, #1ad5d5, #4df24d, #f8d91a, #ff4019); }
-      #panel select { background:#0e0f15; color:#e7e9f0; border:1px solid #1f1f2c; padding:4px 6px; border-radius:4px; font-family:inherit; font-size:0.85rem; flex:1; }
-      #panel label.inline { font-size:0.82rem; margin-right:6px; min-width:38px; }
-      #panel label.checkbox { display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer; }
-      #panel label.checkbox input { width:14px; height:14px; cursor:pointer; }
-      #panel details.inlets-advanced { margin-top:6px; font-size:0.82rem; }
-      #panel details.inlets-advanced summary { cursor:pointer; color:#a3a8b8; padding:4px 0; }
-      #panel .inlet-row { border-top:1px solid #1f1f2c; padding:6px 0; }
+      #slice-overlay .slice-title { font-size:0.68rem; letter-spacing:0.12em; text-transform:uppercase; margin-bottom:6px; color:var(--accent); }
+      #slice-overlay canvas { display:block; border-radius:5px; image-rendering:pixelated; background:#000; }
+      #slice-overlay .slice-legend { display:flex; align-items:center; justify-content:space-between; margin-top:6px; font-size:0.64rem; letter-spacing:0.06em; }
+      #slice-overlay .legend-bar { flex:1; height:6px; margin:0 8px; border-radius:3px; background:linear-gradient(to right,#1a0b3a,#1a66f2,#1ad5d5,#4df24d,#f8d91a,#ff4019); }
+
+      /* ── Full-viewport slice (slice tab) ── */
+      #slice-fullvp { position:fixed; inset:48px 0 0 0; z-index:30; display:flex; flex-direction:column; align-items:center; justify-content:center; background:rgba(7,7,11,0.96); }
+      #slice-fullvp[hidden] { display:none !important; }
+      #slice-fullvp .slice-vp-header { display:flex; align-items:center; gap:24px; margin-bottom:16px; }
+      #slice-fullvp #slice-vp-title { font-family:var(--mono); font-size:0.75rem; letter-spacing:0.14em; text-transform:uppercase; color:var(--accent); }
+      #slice-fullvp .slice-vp-legend { display:flex; align-items:center; gap:8px; font-size:0.68rem; color:var(--fg-dim); font-family:var(--mono); }
+      #slice-fullvp .legend-bar { width:120px; height:6px; border-radius:3px; background:linear-gradient(to right,#1a0b3a,#1a66f2,#1ad5d5,#4df24d,#f8d91a,#ff4019); }
+      #slice-fullvp canvas { max-width:min(80vw, 80vh); max-height:min(80vw, 80vh); width:100%; height:100%; border-radius:6px; image-rendering:pixelated; border:1px solid var(--line); }
+
+      /* ── Panel select + inline labels ── */
+      #panel select { background:var(--panel-2); color:var(--fg); border:1px solid var(--line); padding:7px 10px; border-radius:5px; font-family:var(--sans); font-size:0.82rem; flex:1; outline:none; }
+      #panel select:focus { border-color:var(--accent); }
+      #panel label.inline { font-size:0.78rem; margin-right:6px; min-width:38px; color:var(--fg-dim); }
+      #panel label.checkbox { display:flex; align-items:center; gap:8px; font-size:0.8rem; cursor:pointer; }
+      #panel label.checkbox input { width:14px; height:14px; cursor:pointer; accent-color:var(--accent); }
+      #panel details.inlets-advanced { margin-top:8px; font-size:0.8rem; }
+      #panel details.inlets-advanced summary { cursor:pointer; color:var(--fg-dim); padding:4px 0; }
+      #panel .inlet-row { border-top:1px solid var(--line); padding:6px 0; }
       #panel .inlet-row .inlet-head { display:flex; align-items:center; }
-      #panel .inlet-row .inlet-slider { display:block; margin-top:4px; font-size:0.78rem; color:#a3a8b8; }
-      #panel .inlet-row .inlet-slider .val { float:right; color:#cdd6f4; }
+      #panel .inlet-row .inlet-slider { display:block; margin-top:4px; font-size:0.76rem; color:var(--fg-dim); }
+      #panel .inlet-row .inlet-slider .val { float:right; color:var(--fg); font-family:var(--mono); }
       #panel .inlet-row .inlet-slider input[type=range] { width:100%; margin-top:2px; }
-      #tests-results { list-style:none; padding:0; margin:6px 0 0 0; font-size:0.74rem; font-family:'SF Mono', Menlo, monospace; }
-      #tests-results li { padding:2px 0; display:flex; justify-content:space-between; gap:6px; border-bottom:1px solid #1f1f2c; }
-      #tests-results li .name { flex:1; color:#a3a8b8; }
-      #tests-results li.pass .name::before { content:'✓ '; color:#6bf0d6; }
-      #tests-results li.fail .name::before { content:'✗ '; color:#ff6b6b; }
-      #tests-results li .value { color:#5b6076; font-variant-numeric:tabular-nums; }
-      #tests-summary { color:#a3a8b8; font-size:0.78rem; }
+      #tests-results { list-style:none; padding:0; margin:6px 0 0 0; font-size:0.74rem; font-family:var(--mono); }
+      #tests-results li { padding:3px 0; display:flex; justify-content:space-between; gap:6px; border-bottom:1px solid var(--line); }
+      #tests-results li .name { flex:1; color:var(--fg-dim); }
+      #tests-results li.pass .name::before { content:'✓ '; color:var(--accent); }
+      #tests-results li.fail .name::before { content:'✗ '; color:var(--danger); }
+      #tests-results li .value { color:var(--fg-muted); font-variant-numeric:tabular-nums; }
+      #tests-summary { color:var(--fg-dim); font-size:0.78rem; }
+
+      /* ── Panel reopen chip ── */
+      #panel-reopen-btn { position:fixed; right:0; top:50%; transform:translateY(-50%); z-index:60; background:var(--panel-2); color:var(--accent); border:1px solid var(--line); border-right:none; border-radius:6px 0 0 6px; padding:12px 6px; font-size:0.85rem; cursor:pointer; writing-mode:vertical-lr; letter-spacing:0.1em; }
+      #panel-reopen-btn[hidden] { display:none !important; }
+      #panel-reopen-btn:hover { background:var(--panel); border-color:var(--accent); }
     </style>
+
     <script>
+      // Group collapse
       document.querySelectorAll('#panel .group h2').forEach(h2 => {
         h2.addEventListener('click', () => h2.closest('.group').classList.toggle('collapsed'));
       });
+
+      // Panel collapse/expand
+      (function() {
+        const panel = document.getElementById('panel');
+        const handle = document.getElementById('panel-resize-handle');
+        const collapseBtn = document.getElementById('panel-collapse-btn');
+        const reopenBtn = document.getElementById('panel-reopen-btn');
+        const app = document.getElementById('app');
+
+        collapseBtn.addEventListener('click', () => {
+          panel.classList.add('collapsed-panel');
+          reopenBtn.hidden = false;
+          handle.style.display = 'none';
+        });
+        reopenBtn.addEventListener('click', () => {
+          panel.classList.remove('collapsed-panel');
+          reopenBtn.hidden = true;
+          handle.style.display = '';
+        });
+
+        // Drag-resize handle
+        let dragging = false;
+        let startX = 0;
+        let startW = 0;
+        handle.addEventListener('mousedown', e => {
+          dragging = true;
+          startX = e.clientX;
+          startW = panel.offsetWidth;
+          document.body.style.cursor = 'col-resize';
+          document.body.style.userSelect = 'none';
+        });
+        document.addEventListener('mousemove', e => {
+          if (!dragging) return;
+          const delta = startX - e.clientX; // moving left increases panel width
+          const newW = Math.max(280, Math.min(600, startW + delta));
+          panel.style.width = newW + 'px';
+          handle.style.right = newW + 'px';
+          // Update footer width
+          const footer = panel.querySelector('footer');
+          if (footer) footer.style.width = newW + 'px';
+        });
+        document.addEventListener('mouseup', () => {
+          if (!dragging) return;
+          dragging = false;
+          document.body.style.cursor = '';
+          document.body.style.userSelect = '';
+        });
+      })();
     </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
