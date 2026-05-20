@@ -167,6 +167,7 @@ export class App {
       );
       this.particles.setMacrosTexture(this.lbm.macrosTextureView);
       this.particles.jetRadius = this.config.inletRadius;
+      this.syncInletsToGpu();
 
       // Screen-space fluid surface renderer (Splash-style: depth → smooth → normals → fresnel).
       this.fluidSurface = new FluidSurfaceRenderer(
@@ -290,7 +291,14 @@ export class App {
       inletVal.textContent = `${Math.round(this.config.inletRadius * 100)}%`;
       if (this.lbm) this.lbm.inletR = this.config.inletRadius;
       if (this.particles) this.particles.jetRadius = this.config.inletRadius;
+      // Shorthand slider also drives the first inlet's radius so the simple
+      // and advanced views stay consistent.
+      this.config.inlets[0]!.radius = this.config.inletRadius;
+      this.syncInletsToGpu();
     });
+
+    // Build the per-inlet advanced UI inside #inlets-host. Always 4 rows.
+    this.buildInletsUI();
 
     const ballSlider = q<HTMLInputElement>('#sl-ball');
     const ballVal = q<HTMLSpanElement>('#val-ball');
@@ -673,6 +681,68 @@ export class App {
     inlet.position.set(-sx * 0.5, 0, 0);
     inlet.rotation.y = Math.PI * 0.5;
     this.latticeGroup.add(inlet);
+  }
+
+  /** Push the current inlet array into LBM3D + ParticleSystem. */
+  private syncInletsToGpu() {
+    if (this.lbm) this.lbm.inlets = this.config.inlets.map((i) => ({ ...i }));
+    if (this.particles) this.particles.inlets = this.config.inlets.map((i) => ({ ...i }));
+  }
+
+  /** Build 4 inlet rows (Y / Z / Size sliders + Enable checkbox) into #inlets-host. */
+  private buildInletsUI() {
+    const host = document.getElementById('inlets-host');
+    if (!host) return;
+    host.innerHTML = '';
+    for (let k = 0; k < this.config.inlets.length; k++) {
+      const inlet = this.config.inlets[k]!;
+      const row = document.createElement('div');
+      row.className = 'inlet-row';
+      row.innerHTML = `
+        <div class="inlet-head">
+          <label class="checkbox">
+            <input type="checkbox" data-inlet="${k}" data-field="enabled" ${inlet.enabled ? 'checked' : ''}/>
+            <span>Inlet ${k + 1}</span>
+          </label>
+        </div>
+        <label class="inlet-slider">Y <span class="val">${Math.round(inlet.yFrac * 100)}%</span>
+          <input type="range" min="0.05" max="0.95" step="0.005" value="${inlet.yFrac}" data-inlet="${k}" data-field="yFrac" />
+        </label>
+        <label class="inlet-slider">Z <span class="val">${Math.round(inlet.zFrac * 100)}%</span>
+          <input type="range" min="0.05" max="0.95" step="0.005" value="${inlet.zFrac}" data-inlet="${k}" data-field="zFrac" />
+        </label>
+        <label class="inlet-slider">Size <span class="val">${Math.round(inlet.radius * 100)}%</span>
+          <input type="range" min="0.02" max="0.45" step="0.005" value="${inlet.radius}" data-inlet="${k}" data-field="radius" />
+        </label>
+      `;
+      host.appendChild(row);
+    }
+    host.querySelectorAll<HTMLInputElement>('input').forEach((el) => {
+      const k = parseInt(el.dataset.inlet ?? '0', 10);
+      const field = el.dataset.field as 'enabled' | 'yFrac' | 'zFrac' | 'radius';
+      el.addEventListener('input', () => {
+        const inlet = this.config.inlets[k]!;
+        if (field === 'enabled') {
+          inlet.enabled = el.checked;
+        } else {
+          const v = parseFloat(el.value);
+          inlet[field] = v;
+          const valSpan = el.parentElement?.querySelector('.val');
+          if (valSpan) valSpan.textContent = `${Math.round(v * 100)}%`;
+        }
+        // Keep the shorthand slider in sync when the user edits inlet 1's radius.
+        if (k === 0 && field === 'radius') {
+          this.config.inletRadius = inlet.radius;
+          if (this.lbm) this.lbm.inletR = inlet.radius;
+          if (this.particles) this.particles.jetRadius = inlet.radius;
+          const sl = document.getElementById('sl-inlet') as HTMLInputElement | null;
+          const lv = document.getElementById('val-inlet');
+          if (sl) sl.value = String(inlet.radius);
+          if (lv) lv.textContent = `${Math.round(inlet.radius * 100)}%`;
+        }
+        this.syncInletsToGpu();
+      });
+    });
   }
 
   /**

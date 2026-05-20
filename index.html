@@ -106,6 +106,10 @@
             <label>Inlet size <span class="val" id="val-inlet">12%</span>
               <input id="sl-inlet" type="range" min="0.04" max="0.45" step="0.005" value="0.12" />
             </label>
+            <details class="inlets-advanced">
+              <summary>Advanced inlets (1–4 jets)</summary>
+              <div id="inlets-host"></div>
+            </details>
             <label>Ball size <span class="val" id="val-ball">1.00×</span>
               <input id="sl-ball" type="range" min="0.3" max="3" step="0.05" value="1" />
             </label>
@@ -252,6 +256,13 @@
       #panel label.inline { font-size:0.82rem; margin-right:6px; min-width:38px; }
       #panel label.checkbox { display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer; }
       #panel label.checkbox input { width:14px; height:14px; cursor:pointer; }
+      #panel details.inlets-advanced { margin-top:6px; font-size:0.82rem; }
+      #panel details.inlets-advanced summary { cursor:pointer; color:#a3a8b8; padding:4px 0; }
+      #panel .inlet-row { border-top:1px solid #1f1f2c; padding:6px 0; }
+      #panel .inlet-row .inlet-head { display:flex; align-items:center; }
+      #panel .inlet-row .inlet-slider { display:block; margin-top:4px; font-size:0.78rem; color:#a3a8b8; }
+      #panel .inlet-row .inlet-slider .val { float:right; color:#cdd6f4; }
+      #panel .inlet-row .inlet-slider input[type=range] { width:100%; margin-top:2px; }
     </style>
     <script>
       document.querySelectorAll('#panel .group h2').forEach(h2 => {

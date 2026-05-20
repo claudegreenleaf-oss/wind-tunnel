@@ -1,6 +1,7 @@
 import LBM_WGSL from './lbm3d.wgsl?raw';
 import INIT_WGSL from './init3d.wgsl?raw';
 import { voxelize, type ShapeId } from './voxelize';
+import { MAX_INLETS, type InletConfig } from '../config';
 
 /**
  * D3Q19 BGK Lattice Boltzmann solver, raw WebGPU.
@@ -22,8 +23,15 @@ export class LBM3D {
   uIn = 0.08;
   visc = 0.005;
   aoaRad = 0;
-  /** Inlet jet disc radius as a fraction of the cross-section. */
+  /** Legacy single-inlet radius; the multi-inlet array drives the BC. */
   inletR = 0.12;
+  /** Up to MAX_INLETS independent inlet discs. */
+  inlets: InletConfig[] = [
+    { enabled: true, yFrac: 0.5, zFrac: 0.5, radius: 0.12 },
+    { enabled: false, yFrac: 0.5, zFrac: 0.5, radius: 0.12 },
+    { enabled: false, yFrac: 0.5, zFrac: 0.5, radius: 0.12 },
+    { enabled: false, yFrac: 0.5, zFrac: 0.5, radius: 0.12 },
+  ];
   gravity: [number, number, number] = [0, 0, 0];
   useMRT = 0;   // 0 = BGK, 1 = TRT
   useLES = 0;   // 0 = off, 1 = Smagorinsky LES
@@ -84,7 +92,7 @@ export class LBM3D {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     this.paramsBuf = this.device.createBuffer({
-      size: 64,   // vec4u dims(16) + f32x4 omega/uIn/aoa/pad(16) + vec4f gravity(16) + u32x4 flags(16)
+      size: 128,  // 64 B header + 4 × vec4f inlets (64 B)
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -205,12 +213,13 @@ export class LBM3D {
   private writeParams() {
     const tau = 3 * this.visc + 0.5;
     const omega = 1 / Math.max(tau, 0.5001);
-    // Layout (64 bytes):
-    //   [0..3]  u32: W, H, D, pad       (16 bytes)
-    //   [4..7]  f32: omega, uIn, aoa, pad (16 bytes)
-    //   [8..11] f32: gx, gy, gz, pad    (16 bytes)
-    //   [12..15] u32: useMRT, useLES, freeSlip, pad (16 bytes)
-    const buf = new ArrayBuffer(64);
+    // Layout (128 bytes):
+    //   [0..3]   u32 dims        (16)
+    //   [4..7]   f32 omega, uIn, aoa, inletR  (16)
+    //   [8..11]  f32 gravity     (16)
+    //   [12..15] u32 useMRT, useLES, freeSlip, pad  (16)
+    //   [16..31] f32 inlets[4] × vec4(yFrac, zFrac, radius, enabled)  (64)
+    const buf = new ArrayBuffer(128);
     const u32 = new Uint32Array(buf);
     const f32 = new Float32Array(buf);
     u32[0] = this.W; u32[1] = this.H; u32[2] = this.D; u32[3] = 0;
@@ -226,6 +235,14 @@ export class LBM3D {
     u32[13] = this.useLES;
     u32[14] = this.freeSlip;
     u32[15] = 0;
+    for (let k = 0; k < MAX_INLETS; k++) {
+      const inlet = this.inlets[k] ?? { enabled: false, yFrac: 0.5, zFrac: 0.5, radius: 0 };
+      const base = 16 + k * 4;
+      f32[base + 0] = inlet.yFrac;
+      f32[base + 1] = inlet.zFrac;
+      f32[base + 2] = inlet.radius;
+      f32[base + 3] = inlet.enabled ? 1.0 : 0.0;
+    }
     this.device.queue.writeBuffer(this.paramsBuf, 0, buf);
   }
 

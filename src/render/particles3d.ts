@@ -60,6 +60,13 @@ export class ParticleSystem {
   private obstacleRadius = 0;
   /** Inlet jet disc radius (fraction of cross-section), matches LBM inletR. */
   jetRadius = 0.12;
+  /** Mirror of LBM3D.inlets so particle reseed picks the same inlet discs. */
+  inlets: { enabled: boolean; yFrac: number; zFrac: number; radius: number }[] = [
+    { enabled: true, yFrac: 0.5, zFrac: 0.5, radius: 0.12 },
+    { enabled: false, yFrac: 0.5, zFrac: 0.5, radius: 0.12 },
+    { enabled: false, yFrac: 0.5, zFrac: 0.5, radius: 0.12 },
+    { enabled: false, yFrac: 0.5, zFrac: 0.5, radius: 0.12 },
+  ];
 
   setObstacle(center: { x: number; y: number; z: number }, radius: number) {
     this.obstacleCenter = [center.x, center.y, center.z];
@@ -168,7 +175,7 @@ export class ParticleSystem {
     //   dt, maxAge, frameSeed, pointSize (16)
     //   pad (48)
     this.uniformBuf = this.device.createBuffer({
-      size: 256,
+      size: 320,  // 256 B base + 4 × vec4 inlet entries
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -356,7 +363,7 @@ export class ParticleSystem {
     maxAge: number,
     pointSize: number,
   ) {
-    const buf = new Float32Array(64);
+    const buf = new Float32Array(80);
     buf.set(view.elements, 0);
     buf.set(proj.elements, 16);
     buf[32] = camPos.x; buf[33] = camPos.y; buf[34] = camPos.z; buf[35] = 1;
@@ -372,6 +379,15 @@ export class ParticleSystem {
     // Extras: jetRadius then 3 pads.
     buf[56] = this.jetRadius;
     buf[57] = 0; buf[58] = 0; buf[59] = 0;
+    // Inlets [4] × vec4(yFrac, zFrac, radius, enabled)
+    for (let k = 0; k < 4; k++) {
+      const i = this.inlets[k] ?? { enabled: false, yFrac: 0.5, zFrac: 0.5, radius: 0 };
+      const base = 60 + k * 4;
+      buf[base + 0] = i.yFrac;
+      buf[base + 1] = i.zFrac;
+      buf[base + 2] = i.radius;
+      buf[base + 3] = i.enabled ? 1.0 : 0.0;
+    }
     this.device.queue.writeBuffer(this.uniformBuf, 0, buf.buffer);
     this.frame++;
   }
@@ -478,7 +494,8 @@ struct Uniforms {
   dims      : vec4<f32>,        // W, H, D, _
   params    : vec4<f32>,        // dt, maxAge, frameSeed, pointSize
   obstacle  : vec4<f32>,        // centerX, centerY, centerZ, radius
-  extras    : vec4<f32>,        // jetRadius (matches LBM inletR), pad, pad, pad
+  extras    : vec4<f32>,        // jetRadius (legacy single-inlet), pad, pad, pad
+  inlets    : array<vec4<f32>, 4>,  // (yFrac, zFrac, radius, enabledMask) per inlet
 };
 
 fn hash11(n : f32) -> f32 {
@@ -665,15 +682,41 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
 
     let r = hash31(seed, idx);
-    // Sample a point inside the inlet jet disc (matches LBM jet radius).
-    let theta = r.x * 6.2831853;
-    let radius = sqrt(r.y) * u.extras.x;
+    // Multi-inlet selection: pick an enabled inlet weighted by area (radius²),
+    // then sample uniformly inside its disc. Fallback to the legacy single-jet
+    // (centered, u.extras.x radius) when no inlet is enabled (should never
+    // happen in practice but keeps the shader well-defined).
+    var totalArea : f32 = 0.0;
+    for (var k = 0u; k < 4u; k = k + 1u) {
+      if (u.inlets[k].w >= 0.5) {
+        totalArea = totalArea + u.inlets[k].z * u.inlets[k].z;
+      }
+    }
+    var pickYFrac : f32 = 0.5;
+    var pickZFrac : f32 = 0.5;
+    var pickR     : f32 = u.extras.x;
+    if (totalArea > 0.0) {
+      let r_pick = r.x * totalArea;
+      var cum : f32 = 0.0;
+      for (var k = 0u; k < 4u; k = k + 1u) {
+        if (u.inlets[k].w < 0.5) { continue; }
+        cum = cum + u.inlets[k].z * u.inlets[k].z;
+        if (cum >= r_pick) {
+          pickYFrac = u.inlets[k].x;
+          pickZFrac = u.inlets[k].y;
+          pickR     = u.inlets[k].z;
+          break;
+        }
+      }
+    }
+    // r.x was consumed picking the inlet; use r.y/r.z (still uniform) for
+    // the disc sample, plus a freshly-hashed angle.
+    let theta = hash11(seed * 13.0 + f32(idx) * 0.7) * 6.2831853;
+    let radius = sqrt(r.y) * pickR;
     let dy = radius * cos(theta);
     let dz = radius * sin(theta);
-    let centerY = aabbMin.y + 0.5 * aabbSize.y;
-    let centerZ = aabbMin.z + 0.5 * aabbSize.z;
-    let jetY = centerY + dy * aabbSize.y;
-    let jetZ = centerZ + dz * aabbSize.z;
+    let jetY = aabbMin.y + pickYFrac * aabbSize.y + dy * aabbSize.y;
+    let jetZ = aabbMin.z + pickZFrac * aabbSize.z + dz * aabbSize.z;
 
     // First-time seed (age set to 9999 on JS init) — distribute along the jet
     // tube length so the volume looks populated immediately. Subsequent reseeds

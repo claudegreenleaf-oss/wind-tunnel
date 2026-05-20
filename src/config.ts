@@ -6,6 +6,17 @@
  * where N is the user-controlled resolution slider value.
  */
 
+/** Up to this many independent inlet discs can be active at once. */
+export const MAX_INLETS = 4;
+
+/** Per-inlet config. All four slots are always present; `enabled` switches them on/off. */
+export interface InletConfig {
+  enabled: boolean;
+  yFrac: number;    // 0 = bottom edge of inlet plane, 1 = top edge
+  zFrac: number;    // 0 = -z edge, 1 = +z edge
+  radius: number;   // disc radius as a fraction of the cross-section
+}
+
 export interface SimConfig {
   // Resolution
   N: number;          // base resolution; W=2N, H=N, D=N
@@ -27,7 +38,8 @@ export interface SimConfig {
   rollDeg: number;    // rotation around flow (X) axis
   scaleMul: number;   // 1 = registry default size
   obstacleXFrac: number;  // 0 = at inlet, 1 = at outlet; default 0.3
-  inletRadius: number;    // jet disc radius as a fraction of cross-section; default 0.12
+  inletRadius: number;    // legacy single-inlet radius — shadows inlets[0].radius
+  inlets: InletConfig[];  // always length MAX_INLETS
   ballSize: number;       // multiplier on the rendered particle sphere size; default 1.0
   floorEnabled: boolean;  // when true a solid horizontal floor is added at floorYFrac
   floorYFrac: number;     // floor height as a fraction of sy from the bottom (0 = bottom, 1 = top)
@@ -41,12 +53,17 @@ export interface SimConfig {
 export function defaultConfig(): SimConfig {
   return {
     N: 80,
-    uIn: 0.12,        // moderate — clean streamlines without violent vortex shedding
-    visc: 0.020,      // higher visc → laminar-ish flow, cleaner wake structure
+    uIn: 0.12,        // moderate inlet velocity
+    // Lower default viscosity than before (was 0.020) to raise Re into the
+    // shedding regime; TRT + LES keep things stable at that Re.
+    visc: 0.010,
     aoaDeg: 0,
     gravity: [0, 0, 0],
-    useMRT: false,
-    useLES: false,
+    // TRT collision is the modern default — drastically more accurate than
+    // single-relaxation BGK at the same cost. LES on by default keeps
+    // sub-grid turbulence dissipation honest at the higher Re.
+    useMRT: true,
+    useLES: true,
     freeSlip: false,
     shapeId: 'sphere',
     yawDeg: 0,
@@ -55,6 +72,12 @@ export function defaultConfig(): SimConfig {
     scaleMul: 1,
     obstacleXFrac: 0.3,
     inletRadius: 0.12,
+    inlets: [
+      { enabled: true,  yFrac: 0.5, zFrac: 0.5, radius: 0.12 },
+      { enabled: false, yFrac: 0.5, zFrac: 0.5, radius: 0.12 },
+      { enabled: false, yFrac: 0.5, zFrac: 0.5, radius: 0.12 },
+      { enabled: false, yFrac: 0.5, zFrac: 0.5, radius: 0.12 },
+    ],
     ballSize: 1.0,
     floorEnabled: false,
     floorYFrac: 0.0,

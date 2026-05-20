@@ -19,12 +19,14 @@ struct Params {
   omega:    f32,
   uIn:      f32,
   aoaRad:   f32,
-  inletR:   f32,        // jet disc radius as fraction of cross-section
+  inletR:   f32,        // legacy single-inlet radius (unused by the multi-inlet loop)
   gravity:  vec4<f32>,  // gx, gy, gz, pad
   useMRT:   u32,        // 0=BGK, 1=TRT
   useLES:   u32,        // 0=off, 1=Smagorinsky
   freeSlip: u32,        // 0=no-slip, 1=free-slip
   _pad1:    u32,
+  // 4 inlets: each vec4 = (yFrac, zFrac, radius, enabledMask 0/1).
+  inlets:   array<vec4<f32>, 4>,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -220,14 +222,24 @@ fn cs_step(@builtin(global_invocation_id) gid: vec3<u32>) {
   // Outside the disc is held at zero velocity = closed wall. Smooth profile
   // inside avoids the sharp shear layer that triggers vortex shedding.
   if (gid.x == 0u) {
-    let H = f32(params.dims.y);
-    let D = f32(params.dims.z);
-    let cy = (f32(gid.y) + 0.5) / H - 0.5;
-    let cz = (f32(gid.z) + 0.5) / D - 0.5;
-    let r = sqrt(cy * cy + cz * cz);
-    let jetR = params.inletR;                         // configurable inlet disc radius
-    let edgeBlend = 0.04;                            // smooth boundary
-    let profile = 1.0 - smoothstep(jetR - edgeBlend, jetR + edgeBlend, r);
+    // Multi-inlet: any cell on the -X plane inside one of up to 4 enabled
+    // discs gets pushed back to equilibrium with the inlet velocity. The
+    // soft profile (max over the discs) prevents sharp shear at the inlet.
+    let Hf = f32(params.dims.y);
+    let Df = f32(params.dims.z);
+    let yLocal = (f32(gid.y) + 0.5) / Hf;
+    let zLocal = (f32(gid.z) + 0.5) / Df;
+    var profile : f32 = 0.0;
+    for (var k = 0u; k < 4u; k = k + 1u) {
+      let inlet = params.inlets[k];
+      if (inlet.w < 0.5) { continue; }  // disabled slot
+      let dy = yLocal - inlet.x;
+      let dz = zLocal - inlet.y;
+      let dist = sqrt(dy * dy + dz * dz);
+      let edgeBlend = 0.04;
+      let p = 1.0 - smoothstep(inlet.z - edgeBlend, inlet.z + edgeBlend, dist);
+      profile = max(profile, p);
+    }
     rho = 1.0;
     u = uInVec * profile;
     for (var i = 0u; i < 19u; i = i + 1u) {
