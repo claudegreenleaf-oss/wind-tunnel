@@ -197,6 +197,17 @@
           </div>
         </section>
 
+        <section class="group collapsed">
+          <h2>Physics tests</h2>
+          <div class="group-body">
+            <div class="row">
+              <button id="btn-run-tests" class="btn">Run all</button>
+              <span id="tests-summary" class="hint"></span>
+            </div>
+            <ul id="tests-results"></ul>
+          </div>
+        </section>
+
         <section class="group hud">
           <h2>Readout</h2>
           <div class="group-body">
@@ -263,6 +274,13 @@
       #panel .inlet-row .inlet-slider { display:block; margin-top:4px; font-size:0.78rem; color:#a3a8b8; }
       #panel .inlet-row .inlet-slider .val { float:right; color:#cdd6f4; }
       #panel .inlet-row .inlet-slider input[type=range] { width:100%; margin-top:2px; }
+      #tests-results { list-style:none; padding:0; margin:6px 0 0 0; font-size:0.74rem; font-family:'SF Mono', Menlo, monospace; }
+      #tests-results li { padding:2px 0; display:flex; justify-content:space-between; gap:6px; border-bottom:1px solid #1f1f2c; }
+      #tests-results li .name { flex:1; color:#a3a8b8; }
+      #tests-results li.pass .name::before { content:'✓ '; color:#6bf0d6; }
+      #tests-results li.fail .name::before { content:'✗ '; color:#ff6b6b; }
+      #tests-results li .value { color:#5b6076; font-variant-numeric:tabular-nums; }
+      #tests-summary { color:#a3a8b8; font-size:0.78rem; }
     </style>
     <script>
       document.querySelectorAll('#panel .group h2').forEach(h2 => {

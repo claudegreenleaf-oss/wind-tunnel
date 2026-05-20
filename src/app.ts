@@ -22,6 +22,7 @@ import type { ShapeId } from './sim/voxelize';
 import { voxelizeMesh } from './obstacles/upload';
 import { showToast } from './ui/toast';
 import INJECT_WGSL from './sim/inject.wgsl?raw';
+import { runAllPhysicsTests } from './tests/physicsTests';
 
 /**
  * Top-level orchestrator (3D).
@@ -435,6 +436,40 @@ export class App {
       this.config.floorYFrac = parseFloat(floorSl.value);
       floorVal.textContent = `${Math.round(this.config.floorYFrac * 100)}%`;
       if (this.config.floorEnabled) this.applyFloor();
+    });
+
+    // Physics test runner. Algebraic tests are sync; GPU tests pause the
+    // live sim, run a brief diagnostic, then return control.
+    const testsBtn = q<HTMLButtonElement>('#btn-run-tests');
+    const testsList = q<HTMLUListElement>('#tests-results');
+    const testsSummary = q<HTMLSpanElement>('#tests-summary');
+    testsBtn.addEventListener('click', async () => {
+      testsBtn.disabled = true;
+      testsSummary.textContent = 'Running…';
+      testsList.innerHTML = '';
+      try {
+        const results = await runAllPhysicsTests(this.lbm ?? undefined);
+        const passed = results.filter((r) => r.passed).length;
+        testsSummary.textContent = `${passed}/${results.length} passed`;
+        for (const r of results) {
+          const li = document.createElement('li');
+          li.className = r.passed ? 'pass' : 'fail';
+          const name = document.createElement('span');
+          name.className = 'name';
+          name.textContent = r.name;
+          const value = document.createElement('span');
+          value.className = 'value';
+          value.textContent = r.message || `${r.value.toExponential(2)} (≤ ${r.tolerance.toExponential(1)})`;
+          li.appendChild(name);
+          li.appendChild(value);
+          testsList.appendChild(li);
+        }
+      } catch (err) {
+        testsSummary.textContent = 'Error — see console';
+        console.error('Physics tests failed', err);
+      } finally {
+        testsBtn.disabled = false;
+      }
     });
 
     q<HTMLButtonElement>('#btn-reset').addEventListener('click', () => {
