@@ -692,17 +692,20 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
       let macros = textureSampleLevel(macrosTex, samp, uvwSub, 0.0);
       let cellSize = aabbSize / u.dims.xyz;
       let vel_world = macros.xyz * cellSize;
-      // Lagrangian-stochastic diffusive kick (Pope, "Turbulent Flows" §12.3).
-      // Real flows break tracer "strings" through molecular + turbulent
-      // diffusion; without it every particle follows its streamline forever
-      // and the inlet emission renders as a comb of beaded paths. A small
-      // isotropic random walk (~0.08 cells per substep ⇒ ~0.6 cells/frame
-      // RMS over 8 substeps) restores the natural smoke-plume look.
-      let noiseSeed = seed + f32(idx) * 0.137 + f32(k) * 1.713;
-      let nx = hash11(noiseSeed * 1.93) - 0.5;
-      let ny = hash11(noiseSeed * 1.13 + 0.7) - 0.5;
-      let nz = hash11(noiseSeed * 0.71 + 1.3) - 0.5;
-      let noise = vec3<f32>(nx, ny, nz) * cellSize * 0.16;
+      // Lagrangian-stochastic kick (Pope §12.3): a tiny isotropic perturbation
+      // applied ONCE every 50 frames per particle. Just enough to gradually
+      // randomise streamline-locked paths without visibly jittering particles
+      // frame-to-frame. Net diffusion ≈ 0.005 cells / 50 frames ⇒ ~0.1 mm/s
+      // in physical units, well below the convective velocity.
+      let frameI = i32(seed);
+      var noise = vec3<f32>(0.0);
+      if ((frameI + i32(idx)) % 50 == 0 && k == 0) {
+        let noiseSeed = seed + f32(idx) * 0.137;
+        let nx = hash11(noiseSeed * 1.93) - 0.5;
+        let ny = hash11(noiseSeed * 1.13 + 0.7) - 0.5;
+        let nz = hash11(noiseSeed * 0.71 + 1.3) - 0.5;
+        noise = vec3<f32>(nx, ny, nz) * cellSize * 0.005;
+      }
       pos = pos + vel_world * subDt + noise;
     }
     if exited {
