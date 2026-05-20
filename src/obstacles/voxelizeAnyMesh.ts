@@ -58,6 +58,13 @@ export function voxelizeAnyMesh(
   };
 
   // ---- Pass 1: surface voxelize via dense barycentric sampling ----
+  //
+  // 2×2×2 stamp per sample: each sample point at (px,py,pz) marks the 8
+  // voxels that share its containing-cell corner. This closes the 1-cell
+  // diagonal gaps that a single-floor-stamp leaves on sharp edges (the
+  // root cause of particle-tunneling-through-pyramid-tips). Cost: 8×
+  // mask writes per sample, but the writes go to the same cache line in
+  // most cases. Surface ends up ~2 cells thick — acceptable.
   for (let t = 0; t < triCount; t++) {
     const ia = idx ? idx.getX(t * 3) : t * 3;
     const ib = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
@@ -75,11 +82,19 @@ export function voxelizeAnyMesh(
         const px = a.x * uf + b.x * vf + c.x * wf;
         const py = a.y * uf + b.y * vf + c.y * wf;
         const pz = a.z * uf + b.z * vf + c.z * wf;
-        const ix = Math.floor(px);
-        const iy = Math.floor(py);
-        const iz = Math.floor(pz);
-        if (ix >= 0 && ix < W && iy >= 0 && iy < H && iz >= 0 && iz < D) {
-          mask[ix + iy * W + iz * W * H] = 1;
+        const ix0 = Math.floor(px), iy0 = Math.floor(py), iz0 = Math.floor(pz);
+        for (let dx = 0; dx <= 1; dx++) {
+          const x = ix0 + dx;
+          if (x < 0 || x >= W) continue;
+          for (let dy = 0; dy <= 1; dy++) {
+            const y = iy0 + dy;
+            if (y < 0 || y >= H) continue;
+            for (let dz = 0; dz <= 1; dz++) {
+              const z = iz0 + dz;
+              if (z < 0 || z >= D) continue;
+              mask[x + y * W + z * W * H] = 1;
+            }
+          }
         }
       }
     }
