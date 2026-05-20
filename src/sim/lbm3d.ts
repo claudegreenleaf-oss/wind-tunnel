@@ -211,8 +211,17 @@ export class LBM3D {
   }
 
   private writeParams() {
-    const tau = 3 * this.visc + 0.5;
-    const omega = 1 / Math.max(tau, 0.5001);
+    // Auto-clamp τ ≥ 0.55: τ=0.5 is the BGK stability cliff and at 0.5001
+    // (the previous floor) any small velocity perturbation can blow up.
+    // 0.55 keeps a safety margin without visibly changing the macroscopic
+    // viscosity slider response.
+    const rawTau = 3 * this.visc + 0.5;
+    const tau = Math.max(rawTau, 0.55);
+    const omega = 1 / tau;
+    // Mach guard: lattice c_s² = 1/3 ⇒ Ma ≈ uIn/√(1/3) ≈ uIn·1.732.
+    // Ma > 0.3 is where LBM compressibility errors explode; clamp uIn at 0.15
+    // (Ma ≈ 0.26) so the sim stays in the safe range regardless of slider abuse.
+    const clampedUIn = Math.min(this.uIn, 0.15);
     // Layout (128 bytes):
     //   [0..3]   u32 dims        (16)
     //   [4..7]   f32 omega, uIn, aoa, inletR  (16)
@@ -224,7 +233,7 @@ export class LBM3D {
     const f32 = new Float32Array(buf);
     u32[0] = this.W; u32[1] = this.H; u32[2] = this.D; u32[3] = 0;
     f32[4] = omega;
-    f32[5] = this.uIn;
+    f32[5] = clampedUIn;
     f32[6] = this.aoaRad;
     f32[7] = this.inletR;
     f32[8] = this.gravity[0];

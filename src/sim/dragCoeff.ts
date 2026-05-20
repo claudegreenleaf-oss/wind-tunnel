@@ -212,7 +212,10 @@ export class DragCoeffCalc {
   /** Rebind macros + mask + lattice dims. Call after any LBM resize/voxelization. */
   setInputs(macros: GPUTextureView, mask: GPUBuffer, dims: { W: number; H: number; D: number }) {
     this.W = dims.W; this.H = dims.H; this.D = dims.D;
-    const sampler = this.device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+    // NEAREST, not linear: linear filtering averages in zero-velocity solid cells
+    // adjacent to walls, halving the strain rate at the wall and making Cd read
+    // ~half its true value. Cell-centred integer sampling preserves the gradient.
+    const sampler = this.device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
     this.bindGroup = this.device.createBindGroup({
       layout: this.layout,
       entries: [
@@ -231,7 +234,15 @@ export class DragCoeffCalc {
   setUIn(u: number) { this.uIn = u; }
   setVisc(v: number) { this.visc = v; }
   setFrontalArea(cells: number) {
-    this.frontalArea = Math.max(1, cells);
+    const clamped = Math.max(1, cells);
+    // Reset the EMA when the area changes significantly (>15 %). Otherwise a
+    // shape switch can briefly mix the OLD frontal area into the smoothed
+    // Cd while the new mask is already in the GPU buffer.
+    if (Math.abs(clamped - this.frontalArea) / this.frontalArea > 0.15) {
+      this.cdEMA = 0;
+      this.samplesSinceReset = 0;
+    }
+    this.frontalArea = clamped;
   }
 
   /**

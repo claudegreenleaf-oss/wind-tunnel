@@ -217,6 +217,10 @@ export class ParticleSystem {
         { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '3d' } },
         { binding: 3, visibility: GPUShaderStage.COMPUTE, sampler: { type: 'filtering' } },
         { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        // Solid mask (binding 5) — read-only — so the substep advect can
+        // detect when a sub-step would enter the obstacle and reseed instead
+        // of tunneling through.
+        { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
       ],
     });
 
@@ -329,7 +333,26 @@ export class ParticleSystem {
     this.device.queue.submit([enc.finish()]);
   }
 
-  setMacrosTexture(macrosView: GPUTextureView) {
+  /**
+   * (Re)bind the macros texture + the LBM solid mask buffer. The mask is
+   * consulted inside `cs_advect` so particles can't tunnel through the
+   * voxelised obstacle: any substep that would land in a solid cell flips
+   * needsReseed instead of moving the particle.
+   */
+  setMacrosTexture(macrosView: GPUTextureView, maskBuf?: GPUBuffer) {
+    // Fall back to a 1-cell dummy mask if no mask buffer is supplied — keeps
+    // the bind group valid before the LBM is fully set up.
+    let mb = maskBuf;
+    if (!mb) {
+      if (!this._dummyMaskBuf) {
+        this._dummyMaskBuf = this.device.createBuffer({
+          size: 16,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        this.device.queue.writeBuffer(this._dummyMaskBuf, 0, new Uint32Array([0, 0, 0, 0]).buffer);
+      }
+      mb = this._dummyMaskBuf;
+    }
     this.advectBG = this.device.createBindGroup({
       layout: this.advectBgl,
       entries: [
@@ -338,6 +361,7 @@ export class ParticleSystem {
         { binding: 2, resource: macrosView },
         { binding: 3, resource: this.sampler },
         { binding: 4, resource: { buffer: this.prevPosBuf } },
+        { binding: 5, resource: { buffer: mb } },
       ],
     });
     this.renderBG = this.device.createBindGroup({
@@ -351,6 +375,7 @@ export class ParticleSystem {
       ],
     });
   }
+  private _dummyMaskBuf: GPUBuffer | null = null;
 
   private writeUniforms(
     view: THREE.Matrix4,
@@ -614,6 +639,7 @@ const ADVECT_WGSL = COMMON_WGSL + /* wgsl */`
 @group(0) @binding(2) var macrosTex : texture_3d<f32>;
 @group(0) @binding(3) var samp      : sampler;
 @group(0) @binding(4) var<storage, read_write> prevPos : array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> solidMask : array<u32>;
 
 const INVALID : f32 = 9999.0;
 
@@ -643,9 +669,23 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
     let subDt = dt / f32(SUBSTEPS);
     var pos = p.xyz;
     var exited = false;
+    let W = u32(u.dims.x);
+    let H = u32(u.dims.y);
+    let D = u32(u.dims.z);
     for (var k = 0; k < SUBSTEPS; k = k + 1) {
       let uvwSub = (pos - aabbMin) / aabbSize;
       if any(uvwSub < vec3(0.0)) || any(uvwSub > vec3(1.0)) {
+        exited = true;
+        break;
+      }
+      // ANTI-TUNNELING: read the LBM solid mask at this cell. If we would
+      // step into a solid voxel, abort the substep loop and reseed — the
+      // particle has hit the obstacle wall.
+      let xi = u32(clamp(uvwSub.x * f32(W), 0.0, f32(W - 1u)));
+      let yi = u32(clamp(uvwSub.y * f32(H), 0.0, f32(H - 1u)));
+      let zi = u32(clamp(uvwSub.z * f32(D), 0.0, f32(D - 1u)));
+      let cellIdx = xi + yi * W + zi * W * H;
+      if (solidMask[cellIdx] == 1u) {
         exited = true;
         break;
       }
@@ -692,10 +732,19 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
         totalArea = totalArea + u.inlets[k].z * u.inlets[k].z;
       }
     }
+    // No inlets enabled at all? Park the particle off-screen and don't reseed
+    // — the alternative (puffing from the centre) makes the inlet plate look
+    // active when the LBM is correctly emitting nothing.
+    if (totalArea <= 0.0) {
+      let off = vec3(aabbMin.x - aabbSize.x * 2.0, 0.0, 0.0);
+      particles[idx] = vec4(off, maxAge - 1.0);  // stay below maxAge so we don't keep retrying
+      prevPos[idx] = vec4(off, 0.0);
+      return;
+    }
     var pickYFrac : f32 = 0.5;
     var pickZFrac : f32 = 0.5;
     var pickR     : f32 = u.extras.x;
-    if (totalArea > 0.0) {
+    {
       let r_pick = r.x * totalArea;
       var cum : f32 = 0.0;
       for (var k = 0u; k < 4u; k = k + 1u) {
@@ -721,12 +770,16 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
     // First-time seed (age set to 9999 on JS init) — distribute along the jet
     // tube length so the volume looks populated immediately. Subsequent reseeds
     // come back to the inlet face.
+    // Decohere reseed cohorts: mix the per-frame seed with idx and an extra
+    // hash to break the "every particle's k-th reseed lands at the same age"
+    // pattern that creates pulsing emission rings.
+    let ageHash = hash11(f32(idx) * 0.41 + seed * 1.71 + hash11(f32(idx) * 0.137) * 31.4);
     if isInitialSeed {
       p = vec4(
         aabbMin.x + r.z * aabbSize.x,
         jetY,
         jetZ,
-        hash11(f32(idx) * 0.41 + seed) * maxAge * 0.9,
+        ageHash * maxAge * 0.95,
       );
     } else {
       let inletX = aabbMin.x + 0.02 * aabbSize.x;
@@ -734,7 +787,10 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
         inletX + r.z * 0.01 * aabbSize.x,
         jetY,
         jetZ,
-        hash11(f32(idx) * 0.41 + seed) * maxAge * 0.6,
+        // Full [0, maxAge) age range so reseed events distribute uniformly
+        // in time after the cohort decoheres (was 0.6*maxAge, which kept
+        // a 240-frame quiet window after each cycle).
+        ageHash * (maxAge - 1.0),
       );
     }
   }

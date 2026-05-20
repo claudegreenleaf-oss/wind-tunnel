@@ -165,7 +165,7 @@ export class App {
           return [t.width, t.height];
         },
       );
-      this.particles.setMacrosTexture(this.lbm.macrosTextureView);
+      this.particles.setMacrosTexture(this.lbm.macrosTextureView, this.lbm.maskBuffer);
       this.particles.jetRadius = this.config.inletRadius;
       this.syncInletsToGpu();
 
@@ -630,7 +630,7 @@ export class App {
     this.dye = new DyeField3D(this._gpuDevice, W, H, D, () => this.lbm!.macrosTextureView);
     this.dye.injectAmount = this.config.dyeAmount;
     this.volumeRenderer?.setTextures(this.lbm.macrosTextureView, this.dye.currentView);
-    this.particles?.setMacrosTexture(this.lbm.macrosTextureView);
+    this.particles?.setMacrosTexture(this.lbm.macrosTextureView, this.lbm.maskBuffer);
     this.fluidSurface?.setMacrosTexture(this.lbm.macrosTextureView);
     this.fluidSurface?.setMaskBuffer(this.lbm.maskBuffer, { W, H, D });
     this.sliceViewer?.setMacros(this.lbm.macrosTextureView);
