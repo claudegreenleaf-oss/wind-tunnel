@@ -222,11 +222,12 @@ fn cs_step(@builtin(global_invocation_id) gid: vec3<u32>) {
   // Outside the disc is held at zero velocity = closed wall. Smooth profile
   // inside avoids the sharp shear layer that triggers vortex shedding.
   if (gid.x == 0u) {
-    // ===== Zou-He velocity inlet (Zou & He 1997) =====
-    // Replaces the previous equilibrium-projection that over-constrained both
-    // ρ and u (Krüger §5.3.3 warning). With Zou-He, only the 5 unknown
-    // distributions (e.x = +1) are reconstructed; ρ floats to whatever the
-    // interior demands. Acoustic noise at the inlet drops dramatically.
+    // Restored equilibrium-projection inlet (the Zou-He swap caused reverse
+    // flow in the visualisation — Zou & He NEBB at the inlet–wall corner
+    // produces incorrect transverse momentum when the streamed-in f values
+    // are themselves bounce-back-derived rather than pulled from a valid
+    // interior cell). Equilibrium-projection over-constrains ρ but is
+    // numerically stable here.
     let Hf = f32(params.dims.y);
     let Df = f32(params.dims.z);
     let yLocal = (f32(gid.y) + 0.5) / Hf;
@@ -242,24 +243,11 @@ fn cs_step(@builtin(global_invocation_id) gid: vec3<u32>) {
       let p = 1.0 - smoothstep(inlet.z - edgeBlend, inlet.z + edgeBlend, dist);
       profile = max(profile, p);
     }
-    let ux_bc = uInVec.x * profile;
-    let uy_bc = uInVec.y * profile;
-    let uz_bc = 0.0;
-    // ρ derived from known distributions + prescribed u-component (mass cons.)
-    let knowns_0   = f[0]  + f[3]  + f[4]  + f[5]  + f[6]
-                   + f[15] + f[16] + f[17] + f[18];
-    let knowns_neg = f[2]  + f[8]  + f[10] + f[12] + f[14];
-    // Clamp denominator so Ma→1 doesn't blow ρ up.
-    let rho_in = (knowns_0 + 2.0 * knowns_neg) / max(1.0 - ux_bc, 0.01);
-    // Reconstruct the 5 unknown e.x = +1 distributions (Zou-He NEBB).
-    f[1]  = f[2]  + (1.0 / 3.0) * rho_in * ux_bc;
-    f[7]  = f[10] + (1.0 / 6.0) * rho_in * (ux_bc + uy_bc);
-    f[9]  = f[8]  + (1.0 / 6.0) * rho_in * (ux_bc - uy_bc);
-    f[11] = f[14] + (1.0 / 6.0) * rho_in * (ux_bc + uz_bc);
-    f[13] = f[12] + (1.0 / 6.0) * rho_in * (ux_bc - uz_bc);
-    rho = rho_in;
-    u = vec3<f32>(ux_bc, uy_bc, uz_bc);
-    // No collision on the inlet plane — distributions are now BC-consistent.
+    rho = 1.0;
+    u = uInVec * profile;
+    for (var i = 0u; i < 19u; i = i + 1u) {
+      f[i] = feq(i, rho, u);
+    }
   } else {
     // Determine collision omega (possibly modified by LES)
     var omega_use = params.omega;
