@@ -1566,12 +1566,17 @@ export class App {
         this.fluidSurface.renderRawSpheres(view, proj, sphereSize, t, aabbMin, aabbMax);
 
       } else if (this.viewMode === 'streamlines' && this.streamlines) {
-        // ── Streamlines ── RK4 ribbons
-        const slDt = this.config.paused ? 0 : 0.008 * this.config.simSpeed;
+        // ── Streamlines ── RK4 ribbons. dt bumped 10× from 0.008 so ribbons
+        // visibly grow within a few frames of tab activation; previously the
+        // step was too small to perceive any motion.
+        const slDt = this.config.paused ? 0 : 0.08 * this.config.simSpeed;
         this.streamlines.render(view, proj, aabbMin, aabbMax, { W, H, D }, slDt);
 
-      } else if (this.viewMode === 'volume' && this.volumeRenderer) {
+      } else if (this.viewMode === 'volume' && this.volumeRenderer && this.dye) {
         // ── Volumetric heatmap ──
+        // Rebind the dye view each frame: DyeField3D ping-pongs its read/write
+        // textures, so volumeRenderer would otherwise sample the stale half.
+        this.volumeRenderer.setTextures(this.lbm.macrosTextureView, this.dye.currentView);
         this.volumeRenderer.render(view, proj, camPos, aabbMin, aabbMax, 48);
 
       } else if (this.viewMode === 'slice') {

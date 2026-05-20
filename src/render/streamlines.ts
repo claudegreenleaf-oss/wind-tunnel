@@ -274,15 +274,30 @@ export class StreamlineRenderer {
       return (x & 0xffff) / 65536;
     };
     for (let i = 0; i < N_SEEDS; i++) {
-      // distribute seeds across inlet face (x near aabbMin.x) + some depth
-      data[i * 4 + 0] = aabbMin.x + aabbSize.x * rng(i, 1) * 0.15;
+      // Distribute seeds across the FULL volume (not just the inlet face).
+      // Otherwise the ribbon-fill warm-up takes several seconds because seeds
+      // have to advect downstream before they're visible. Volume-wide seeding
+      // means ribbons appear everywhere on tab activation.
+      data[i * 4 + 0] = aabbMin.x + aabbSize.x * rng(i, 1);
       data[i * 4 + 1] = aabbMin.y + aabbSize.y * rng(i, 2);
       data[i * 4 + 2] = aabbMin.z + aabbSize.z * rng(i, 3);
       data[i * 4 + 3] = 0;
     }
+    // Seed the ring buffer with the initial position so segment 0 isn't (0,0,0)
+    // — without this every ribbon's "tail" is a long invisible streak to the
+    // world origin for the first TRACE_LEN frames.
+    const ring = new Float32Array(TRACE_LEN * N_SEEDS * 4);
+    for (let s = 0; s < N_SEEDS; s++) {
+      for (let t = 0; t < TRACE_LEN; t++) {
+        const o = (s * TRACE_LEN + t) * 4;
+        ring[o + 0] = data[s * 4 + 0]!;
+        ring[o + 1] = data[s * 4 + 1]!;
+        ring[o + 2] = data[s * 4 + 2]!;
+        ring[o + 3] = 0;
+      }
+    }
     this.device.queue.writeBuffer(this.seedBuf, 0, data);
-    // Zero out vertex ring buffer
-    this.device.queue.writeBuffer(this.vertBuf, 0, new Float32Array(TRACE_LEN * N_SEEDS * 4));
+    this.device.queue.writeBuffer(this.vertBuf, 0, ring);
     this.head   = 0;
     this.seeded = true;
   }
