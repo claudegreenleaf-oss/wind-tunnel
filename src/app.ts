@@ -962,13 +962,14 @@ export class App {
     if (this.orientDebounceId !== null) clearTimeout(this.orientDebounceId);
     this.orientDebounceId = setTimeout(() => {
       this.orientDebounceId = null;
-      // Re-extract geometry into the LBM + GPU obstacle pipelines so the
-      // physics follows the new orientation. NOTE: we deliberately do NOT
-      // call resetAllParticles here — wiping the pool on every slider input
-      // produces a stop-start inflow. Any particle now overlapping the new
-      // mask volume will be carried out by neighbour velocities within a
-      // frame or two, and the age tick guarantees they cycle within ~10s.
+      // Re-extract geometry into the LBM + GPU obstacle pipelines.
       this.uploadObstacleToFluidSurface();
+      // Reset particles: any tracer inside the new solid volume would
+      // otherwise sit there inert (mask check kills the substep but the
+      // particle keeps registering as "alive" until age timeout). With the
+      // debounce gating this to the END of a drag, it's not the stop-start
+      // inflow that the old per-frame reset caused.
+      this.particles?.resetAllParticles();
     }, 100);
   }
 

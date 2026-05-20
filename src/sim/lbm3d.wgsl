@@ -209,8 +209,14 @@ fn cs_step(@builtin(global_invocation_id) gid: vec3<u32>) {
     rho = rho + f[i];
     mom = mom + f[i] * vec3<f32>(eVec(i));
   }
-  rho = max(rho, 1e-4);
+  // Defensive clamps against transient pathologies (a mask change can leave
+  // one cell with very low ρ for a step; without these guards u = mom/ρ
+  // would explode and the whole velocity field then propagates the spike).
+  rho = clamp(rho, 0.5, 1.5);
   var u: vec3<f32> = mom / rho;
+  let uMaxLen : f32 = 0.3;       // ≈ Ma 0.52 — well below the LBM stability cliff
+  let uMag = length(u);
+  if (uMag > uMaxLen) { u = u * (uMaxLen / uMag); }
 
   // Guo forcing: shift velocity by F/(2*rho) for macroscopics
   let force = params.gravity.xyz;
