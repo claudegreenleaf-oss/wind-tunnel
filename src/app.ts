@@ -430,12 +430,16 @@ export class App {
     floorVal.textContent = `${Math.round(this.config.floorYFrac * 100)}%`;
     floorCb.addEventListener('change', () => {
       this.config.floorEnabled = floorCb.checked;
+      this.particles?.resetAllParticles();
       this.applyFloor();
     });
     floorSl.addEventListener('input', () => {
       this.config.floorYFrac = parseFloat(floorSl.value);
       floorVal.textContent = `${Math.round(this.config.floorYFrac * 100)}%`;
-      if (this.config.floorEnabled) this.applyFloor();
+      if (this.config.floorEnabled) {
+        this.particles?.resetAllParticles();
+        this.applyFloor();
+      }
     });
 
     // Physics test runner. Algebraic tests are sync; GPU tests pause the

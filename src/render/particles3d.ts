@@ -92,18 +92,27 @@ export class ParticleSystem {
   resetAllParticles() {
     const MAX_AGE = 600;
     const STAGGER = 60;                                 // ~1s at 60fps
+    const OFFSCREEN = 1e6;                              // park particles far outside any AABB
     const init = new Float32Array(this.N * 4);
+    const prev = new Float32Array(this.N * 4);
     for (let i = 0; i < this.N; i++) {
-      init[i * 4 + 0] = 0;
+      // Park at a sentinel off-screen position right from JS — the GPU
+      // dormant-tick branch later moves them again, but a fast slider drag
+      // can reset multiple times between cs_advect runs, so we need the
+      // particle buffer to ALREADY be off-screen the moment it's written.
+      init[i * 4 + 0] = OFFSCREEN;
       init[i * 4 + 1] = 0;
       init[i * 4 + 2] = 0;
       // Random stagger so particles emerge from the inlet over ~1s, not all at once.
       init[i * 4 + 3] = MAX_AGE + 1 + Math.random() * STAGGER;
+      // prevPos matches so the motion-blur quad collapses (no streak from origin).
+      prev[i * 4 + 0] = OFFSCREEN;
+      prev[i * 4 + 1] = 0;
+      prev[i * 4 + 2] = 0;
+      prev[i * 4 + 3] = 0;
     }
     this.device.queue.writeBuffer(this.particleBuf, 0, init.buffer);
-    // Also clear prev-pos so the next-frame motion blur quad doesn't streak
-    // from a stale position.
-    this.device.queue.writeBuffer(this.prevPosBuf, 0, new Float32Array(this.N * 4).buffer);
+    this.device.queue.writeBuffer(this.prevPosBuf, 0, prev.buffer);
   }
 
   killParticlesInsideObstacle() {
