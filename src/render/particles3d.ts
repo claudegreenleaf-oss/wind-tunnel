@@ -534,6 +534,20 @@ fn hash31(seed : f32, i : u32) -> vec3<f32> {
   );
 }
 
+// PCG hash (Jarzynski & Olano 2020): high-quality bit-mixing scrambler so
+// adjacent particle ids land at uncorrelated disc positions. Replaces the
+// sin-based hash11 for the inlet (y,z) sampling — sin hashing visibly
+// correlated neighbouring idx values, producing the "comb of beaded
+// streamlines" the user saw at the inlet.
+fn pcg(s_in : u32) -> u32 {
+  var s = s_in * 747796405u + 2891336453u;
+  let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+  return (w >> 22u) ^ w;
+}
+fn pcg_f32(s : u32) -> f32 {
+  return f32(pcg(s)) / 4294967296.0;
+}
+
 // ---- value noise + curl noise (Bridson 2007 style turbulence injection) ----
 // Cheap hashed value noise: 3D trilinear interpolation of per-corner hashes.
 fn hash13(p : vec3<f32>) -> f32 {
@@ -690,23 +704,8 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
         break;
       }
       let macros = textureSampleLevel(macrosTex, samp, uvwSub, 0.0);
-      let cellSize = aabbSize / u.dims.xyz;
-      let vel_world = macros.xyz * cellSize;
-      // Lagrangian-stochastic kick (Pope §12.3): a tiny isotropic perturbation
-      // applied ONCE every 50 frames per particle. Just enough to gradually
-      // randomise streamline-locked paths without visibly jittering particles
-      // frame-to-frame. Net diffusion ≈ 0.005 cells / 50 frames ⇒ ~0.1 mm/s
-      // in physical units, well below the convective velocity.
-      let frameI = i32(seed);
-      var noise = vec3<f32>(0.0);
-      if ((frameI + i32(idx)) % 50 == 0 && k == 0) {
-        let noiseSeed = seed + f32(idx) * 0.137;
-        let nx = hash11(noiseSeed * 1.93) - 0.5;
-        let ny = hash11(noiseSeed * 1.13 + 0.7) - 0.5;
-        let nz = hash11(noiseSeed * 0.71 + 1.3) - 0.5;
-        noise = vec3<f32>(nx, ny, nz) * cellSize * 0.005;
-      }
-      pos = pos + vel_world * subDt + noise;
+      let vel_world = macros.xyz * (aabbSize / u.dims.xyz);
+      pos = pos + vel_world * subDt;
     }
     if exited {
       needsReseed = true;
@@ -773,10 +772,21 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
         }
       }
     }
-    // r.x was consumed picking the inlet; use r.y/r.z (still uniform) for
-    // the disc sample, plus a freshly-hashed angle.
-    let theta = hash11(seed * 13.0 + f32(idx) * 0.7) * 6.2831853;
-    let radius = sqrt(r.y) * pickR;
+    // Inlet disc sampling using PCG bit-mixing.  The old sin-based hash
+    // correlated adjacent idx values, so two neighbouring particles landed
+    // on adjacent (y, z) positions and followed near-identical streamlines
+    // — the "strings" the user saw. PCG decorrelates so no two particles
+    // share a path even across thousands of reseed events.
+    //
+    // Reseed index = (idx, frame-bucket): one full reseed cycle per particle
+    // every ~600 frames, so changing frame buckets every 600 frames also
+    // changes the disc landing position.
+    let seedI = u32(max(seed, 0.0));
+    let pcgKey = idx * 2654435761u + seedI;
+    let theta = pcg_f32(pcgKey) * 6.2831853;
+    // Use a SECOND independent PCG for radius so theta⊥radius.
+    let pcgKey2 = pcg(pcgKey ^ 0xa3c59b27u);
+    let radius = sqrt(f32(pcgKey2) / 4294967296.0) * pickR;
     let dy = radius * cos(theta);
     let dz = radius * sin(theta);
     let jetY = aabbMin.y + pickYFrac * aabbSize.y + dy * aabbSize.y;
