@@ -782,15 +782,22 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
         ageHash * maxAge * 0.95,
       );
     } else {
+      // Reseed in a FAT slab (10 % of tube length), not a sheet. The previous
+      // 1 % slab made every emerging cohort look like a "ball at the inlet
+      // centre" — all particles at almost the same x, with only the
+      // jet-disc y/z variation. Spreading the x jitter over ~10 % means the
+      // emerging fluid looks like a stream, not a frame-by-frame puff.
+      // Combined with the decohered ageHash this gives a steady plume.
       let inletX = aabbMin.x + 0.02 * aabbSize.x;
+      let xJitter = r.z * 0.10 * aabbSize.x;
+      // Use a fresh hash for the in-slab age so newly-emerging particles
+      // inherit a uniform age distribution and don't all "catch up" at once.
+      let inSlabAge = ageHash * (maxAge - 1.0);
       p = vec4(
-        inletX + r.z * 0.01 * aabbSize.x,
+        inletX + xJitter,
         jetY,
         jetZ,
-        // Full [0, maxAge) age range so reseed events distribute uniformly
-        // in time after the cohort decoheres (was 0.6*maxAge, which kept
-        // a 240-frame quiet window after each cycle).
-        ageHash * (maxAge - 1.0),
+        inSlabAge,
       );
     }
   }
