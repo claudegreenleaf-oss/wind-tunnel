@@ -959,17 +959,15 @@ export class App {
     m.scale.setScalar(Math.max(0.01, this.config.scaleMul));
     m.updateMatrixWorld(true);
 
+    // Wipe particles on every slider tick. The container stays empty during
+    // the drag (no stale-particle / mask-edge transients to worry about) and
+    // refills naturally from the inlet over ~1 s once the user releases.
+    this.particles?.resetAllParticles();
     if (this.orientDebounceId !== null) clearTimeout(this.orientDebounceId);
     this.orientDebounceId = setTimeout(() => {
       this.orientDebounceId = null;
-      // Re-extract geometry into the LBM + GPU obstacle pipelines.
+      // Final re-voxelization once the user has settled.
       this.uploadObstacleToFluidSurface();
-      // Reset particles: any tracer inside the new solid volume would
-      // otherwise sit there inert (mask check kills the substep but the
-      // particle keeps registering as "alive" until age timeout). With the
-      // debounce gating this to the END of a drag, it's not the stop-start
-      // inflow that the old per-frame reset caused.
-      this.particles?.resetAllParticles();
     }, 100);
   }
 
