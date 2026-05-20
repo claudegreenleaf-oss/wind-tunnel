@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="Real-time GPU 3D wind tunnel simulator. Lattice Boltzmann fluid in your browser. WebGPU." />
-    <meta name="theme-color" content="#07070b" />
+    <meta name="theme-color" content="#04050a" />
     <title>Wind Tunnel 3D · GPU Fluid Simulator</title>
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -12,251 +12,258 @@
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   </head>
   <body>
-    <div id="app">
-      <div id="viewport">
-        <!-- Top tab bar -->
-        <nav id="tab-bar">
-          <button class="tab active" data-mode="particles">Particles</button>
-          <button class="tab" data-mode="streamlines">Streamlines</button>
-          <button class="tab" data-mode="volume">Volumetric</button>
-          <button class="tab" data-mode="slice">Slice</button>
-          <div class="tab-pip" id="tab-pip"></div>
-        </nav>
 
-        <canvas id="view"></canvas>
+    <!-- Full-viewport 3D canvas -->
+    <canvas id="view"></canvas>
+
+    <!-- ── Floating tab pill (top-center) ───────────────────────────────── -->
+    <nav id="tab-bar" role="tablist">
+      <button class="tab active" data-mode="particles">Particles</button>
+      <button class="tab" data-mode="streamlines">Streamlines</button>
+      <button class="tab" data-mode="volume">Volumetric</button>
+      <button class="tab" data-mode="slice">Slice</button>
+      <div class="tab-pip" id="tab-pip"></div>
+    </nav>
+
+    <!-- ── Floating control panel (top-right) ───────────────────────────── -->
+    <aside id="panel">
+      <header>
+        <div class="header-inner">
+          <div>
+            <h1>Wind Tunnel</h1>
+            <div class="sub">WebGPU · D3Q19 · 3D LBM</div>
+          </div>
+        </div>
+      </header>
+
+      <!-- Phase tabs -->
+      <nav class="phase-tabs" role="tablist">
+        <button class="phase-tab active" data-phase="setup">Setup</button>
+        <button class="phase-tab" data-phase="run">Run</button>
+        <button class="phase-tab" data-phase="analyse">Analyse</button>
+      </nav>
+
+      <!-- SETUP ───────────────────────── -->
+      <div class="phase-panel" data-phase="setup">
+
+        <section class="block">
+          <h3>Shape</h3>
+          <select id="shape-select">
+            <optgroup label="Primitives">
+              <option value="sphere">Sphere</option>
+              <option value="cube">Cube</option>
+              <option value="cylinder">Cylinder</option>
+              <option value="cone">Cone</option>
+              <option value="pyramid">Pyramid</option>
+              <option value="torus">Torus</option>
+              <option value="capsule">Capsule</option>
+              <option value="tetrahedron">Tetrahedron</option>
+              <option value="octahedron">Octahedron</option>
+              <option value="dodecahedron">Dodecahedron</option>
+              <option value="icosahedron">Icosahedron</option>
+              <option value="teapot">Teapot</option>
+            </optgroup>
+            <optgroup label="Airfoils">
+              <option value="naca-0006">NACA 0006 (thin sym.)</option>
+              <option value="naca-0012">NACA 0012 (sym.)</option>
+              <option value="naca-0024">NACA 0024 (thick sym.)</option>
+              <option value="naca-2412">NACA 2412 (cambered)</option>
+              <option value="naca-4412">NACA 4412 (high lift)</option>
+              <option value="naca-6412">NACA 6412 (max camber)</option>
+            </optgroup>
+            <optgroup label="Models" id="shape-remote-group"></optgroup>
+            <option value="custom" disabled>Custom (uploaded)</option>
+          </select>
+          <label>Position <span class="val" id="val-xfrac">30%</span>
+            <input id="sl-xfrac" type="range" min="0.05" max="0.95" step="0.01" value="0.3" />
+          </label>
+          <label>Scale <span class="val" id="val-scale">1.00</span>
+            <input id="sl-scale" type="range" min="0.3" max="2.5" step="0.01" value="1" />
+          </label>
+          <label>Yaw <span class="val" id="val-yaw">0°</span>
+            <input id="sl-yaw" type="range" min="-180" max="180" step="1" value="0" />
+          </label>
+          <button class="adv-chip" data-adv="shape-adv">Advanced ▾</button>
+          <div class="adv" id="shape-adv" hidden>
+            <label>Pitch <span class="val" id="val-pitch">0°</span>
+              <input id="sl-pitch" type="range" min="-90" max="90" step="1" value="0" />
+            </label>
+            <label>Roll <span class="val" id="val-roll">0°</span>
+              <input id="sl-roll" type="range" min="-180" max="180" step="1" value="0" />
+            </label>
+            <div class="row">
+              <button id="btn-reset-orient" class="btn">Reset orientation</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="block">
+          <h3>Floor</h3>
+          <label class="checkbox"><input id="cb-floor" type="checkbox" /><span>Enable</span></label>
+          <label>Height <span class="val" id="val-floor">0%</span>
+            <input id="sl-floor" type="range" min="0" max="0.5" step="0.005" value="0" />
+          </label>
+        </section>
+
+        <section class="block">
+          <h3>Resolution</h3>
+          <button class="adv-chip" data-adv="res-adv">Advanced ▾</button>
+          <div class="adv" id="res-adv" hidden>
+            <label>N (lattice) <span class="val" id="val-N"></span>
+              <input id="sl-N" type="range" min="32" max="192" step="1" />
+            </label>
+            <div class="hint" id="cells-hint"></div>
+          </div>
+        </section>
       </div>
 
-      <!-- Drag handle (between viewport and panel) -->
-      <div id="panel-resize-handle"></div>
+      <!-- RUN ─────────────────────────── -->
+      <div class="phase-panel" data-phase="run" hidden>
 
-      <aside id="panel">
-        <!-- Collapse button on the panel's outer left edge -->
-        <button id="panel-collapse-btn" title="Collapse panel">&#x2039;</button>
+        <section class="block">
+          <h3>Flow</h3>
+          <label>Wind speed <span class="val" id="val-speed"></span>
+            <input id="sl-speed" type="range" min="0.005" max="0.18" step="0.001" />
+          </label>
+          <label>Viscosity (Re <span id="val-re"></span>) <span class="val" id="val-visc"></span>
+            <input id="sl-visc" type="range" min="0.0005" max="0.06" step="0.0001" />
+          </label>
+          <label>Angle of attack <span class="val" id="val-aoa"></span>
+            <input id="sl-aoa" type="range" min="-30" max="30" step="1" />
+          </label>
+          <label>Inlet size <span class="val" id="val-inlet">12%</span>
+            <input id="sl-inlet" type="range" min="0.04" max="0.45" step="0.005" value="0.12" />
+          </label>
+          <button class="adv-chip" data-adv="flow-adv">Advanced ▾</button>
+          <div class="adv" id="flow-adv" hidden>
+            <label>Ball size <span class="val" id="val-ball">1.00×</span>
+              <input id="sl-ball" type="range" min="0.3" max="3" step="0.05" value="1" />
+            </label>
+            <div class="hint">Per-jet inlets:</div>
+            <div id="inlets-host"></div>
+          </div>
+        </section>
 
-        <header>
-          <h1>Wind Tunnel</h1>
-          <div class="sub">WebGPU · D3Q19 · 3D LBM</div>
-        </header>
+        <section class="block">
+          <h3>Physics</h3>
+          <div class="row">
+            <button id="btn-mrt" class="btn btn-toggle">Collision: BGK</button>
+            <button id="btn-les" class="btn btn-toggle">Turb: Off</button>
+            <button id="btn-slip" class="btn btn-toggle">Walls: No-slip</button>
+          </div>
+          <button class="adv-chip" data-adv="phys-adv">Advanced ▾</button>
+          <div class="adv" id="phys-adv" hidden>
+            <label>Gravity X <span class="val" id="val-grav-x">0.000</span>
+              <input id="sl-grav-x" type="range" min="-0.001" max="0.001" step="0.00005" value="0" />
+            </label>
+            <label>Gravity Y <span class="val" id="val-grav-y">0.000</span>
+              <input id="sl-grav-y" type="range" min="-0.001" max="0.001" step="0.00005" value="0" />
+            </label>
+            <label>Gravity Z <span class="val" id="val-grav-z">0.000</span>
+              <input id="sl-grav-z" type="range" min="-0.001" max="0.001" step="0.00005" value="0" />
+            </label>
+          </div>
+        </section>
 
-        <!-- Phase tabs -->
-        <nav class="phase-tabs" role="tablist">
-          <button class="phase-tab active" data-phase="setup">Setup</button>
-          <button class="phase-tab" data-phase="run">Run</button>
-          <button class="phase-tab" data-phase="analyse">Analyse</button>
-        </nav>
+        <section class="block">
+          <h3>Time</h3>
+          <div class="row">
+            <button id="btn-play" class="btn">⏸ Pause</button>
+            <button id="btn-step" class="btn" disabled>▶| Step</button>
+            <button id="btn-slowmo" class="btn btn-toggle">Slow-mo</button>
+          </div>
+          <label>Sim speed <span class="val" id="val-speed-mul"></span>
+            <input id="sl-speed-mul" type="range" min="0.1" max="4" step="0.05" />
+          </label>
+          <div class="row"><button id="btn-reset" class="btn btn-danger">Reset flow</button></div>
+        </section>
 
-        <!-- SETUP ───────────────────────── -->
-        <div class="phase-panel" data-phase="setup">
+        <section class="block">
+          <h3>Inject</h3>
+          <div class="row">
+            <button id="btn-inject" class="btn btn-toggle">Inject: Off</button>
+            <button id="btn-inject-mode" class="btn" disabled>Mode: Impulse</button>
+          </div>
+          <div class="hint">Click+drag on canvas while active.</div>
+        </section>
+      </div>
 
-          <section class="block">
-            <h3>Shape</h3>
-            <select id="shape-select">
-              <optgroup label="Primitives">
-                <option value="sphere">Sphere</option>
-                <option value="cube">Cube</option>
-                <option value="cylinder">Cylinder</option>
-                <option value="cone">Cone</option>
-                <option value="pyramid">Pyramid</option>
-                <option value="torus">Torus</option>
-                <option value="capsule">Capsule</option>
-                <option value="tetrahedron">Tetrahedron</option>
-                <option value="octahedron">Octahedron</option>
-                <option value="dodecahedron">Dodecahedron</option>
-                <option value="icosahedron">Icosahedron</option>
-                <option value="teapot">Teapot</option>
-              </optgroup>
-              <optgroup label="Airfoils">
-                <option value="naca-0006">NACA 0006 (thin sym.)</option>
-                <option value="naca-0012">NACA 0012 (sym.)</option>
-                <option value="naca-0024">NACA 0024 (thick sym.)</option>
-                <option value="naca-2412">NACA 2412 (cambered)</option>
-                <option value="naca-4412">NACA 4412 (high lift)</option>
-                <option value="naca-6412">NACA 6412 (max camber)</option>
-              </optgroup>
-              <!-- Remote .glb models are injected here at runtime from modelRegistry.ts -->
-              <optgroup label="Models" id="shape-remote-group"></optgroup>
-              <option value="custom" disabled>Custom (uploaded)</option>
+      <!-- ANALYSE ─────────────────────── -->
+      <div class="phase-panel" data-phase="analyse" hidden>
+
+        <section class="block">
+          <h3>Telemetry</h3>
+          <div class="readout">
+            <div><span class="lbl">Cd</span><span id="rd-cd">—</span></div>
+            <div><span class="lbl">Cl</span><span id="rd-cl">—</span></div>
+            <div><span class="lbl">Re</span><span id="rd-rey">—</span></div>
+            <div><span class="lbl">fps</span><span id="rd-fps">—</span></div>
+          </div>
+        </section>
+
+        <section class="block">
+          <h3>Slice</h3>
+          <div class="hint">Switch to the <strong>Slice</strong> view tab to see the slice fill the viewport.</div>
+          <div class="row">
+            <label class="inline">Axis</label>
+            <select id="sel-slice-axis">
+              <option value="x">X (perp. to flow)</option>
+              <option value="y" selected>Y (horizontal)</option>
+              <option value="z">Z (vertical along flow)</option>
             </select>
-            <label>Position <span class="val" id="val-xfrac">30%</span>
-              <input id="sl-xfrac" type="range" min="0.05" max="0.95" step="0.01" value="0.3" />
-            </label>
-            <label>Scale <span class="val" id="val-scale">1.00</span>
-              <input id="sl-scale" type="range" min="0.3" max="2.5" step="0.01" value="1" />
-            </label>
-            <label>Yaw <span class="val" id="val-yaw">0°</span>
-              <input id="sl-yaw" type="range" min="-180" max="180" step="1" value="0" />
-            </label>
-            <button class="adv-chip" data-adv="shape-adv">Advanced ▾</button>
-            <div class="adv" id="shape-adv" hidden>
-              <label>Pitch <span class="val" id="val-pitch">0°</span>
-                <input id="sl-pitch" type="range" min="-90" max="90" step="1" value="0" />
-              </label>
-              <label>Roll <span class="val" id="val-roll">0°</span>
-                <input id="sl-roll" type="range" min="-180" max="180" step="1" value="0" />
-              </label>
-              <div class="row">
-                <button id="btn-reset-orient" class="btn">Reset orientation</button>
-              </div>
-            </div>
-          </section>
+          </div>
+          <div class="row">
+            <label class="inline">Field</label>
+            <select id="sel-slice-field">
+              <option value="velocity" selected>Velocity</option>
+              <option value="pressure">Pressure</option>
+              <option value="vorticity">Vorticity</option>
+            </select>
+          </div>
+          <label>Position <span class="val" id="val-slice-pos"></span>
+            <input id="sl-slice-pos" type="range" min="0" max="1" step="0.005" value="0.5" />
+          </label>
+          <label class="checkbox"><input id="cb-slice-mask" type="checkbox" /><span>Mask 3D view to slice</span></label>
+        </section>
 
-          <section class="block">
-            <h3>Floor</h3>
-            <label class="checkbox"><input id="cb-floor" type="checkbox" /><span>Enable</span></label>
-            <label>Height <span class="val" id="val-floor">0%</span>
-              <input id="sl-floor" type="range" min="0" max="0.5" step="0.005" value="0" />
-            </label>
-          </section>
+        <section class="block">
+          <h3>Physics tests</h3>
+          <div class="row">
+            <button id="btn-run-tests" class="btn">Run all</button>
+            <span id="tests-summary" class="hint"></span>
+          </div>
+          <ul id="tests-results"></ul>
+        </section>
+      </div>
 
-          <section class="block">
-            <h3>Resolution</h3>
-            <button class="adv-chip" data-adv="res-adv">Advanced ▾</button>
-            <div class="adv" id="res-adv" hidden>
-              <label>N (lattice) <span class="val" id="val-N"></span>
-                <input id="sl-N" type="range" min="32" max="192" step="1" />
-              </label>
-              <div class="hint" id="cells-hint"></div>
-            </div>
-          </section>
-        </div>
+      <footer>
+        <kbd>drag</kbd> orbit · <kbd>scroll</kbd> zoom · <kbd>Space</kbd> pause
+      </footer>
+    </aside>
 
-        <!-- RUN ─────────────────────────── -->
-        <div class="phase-panel" data-phase="run" hidden>
-
-          <section class="block">
-            <h3>Flow</h3>
-            <label>Wind speed <span class="val" id="val-speed"></span>
-              <input id="sl-speed" type="range" min="0.005" max="0.18" step="0.001" />
-            </label>
-            <label>Viscosity (Re <span id="val-re"></span>) <span class="val" id="val-visc"></span>
-              <input id="sl-visc" type="range" min="0.0005" max="0.06" step="0.0001" />
-            </label>
-            <label>Angle of attack <span class="val" id="val-aoa"></span>
-              <input id="sl-aoa" type="range" min="-30" max="30" step="1" />
-            </label>
-            <label>Inlet size <span class="val" id="val-inlet">12%</span>
-              <input id="sl-inlet" type="range" min="0.04" max="0.45" step="0.005" value="0.12" />
-            </label>
-            <button class="adv-chip" data-adv="flow-adv">Advanced ▾</button>
-            <div class="adv" id="flow-adv" hidden>
-              <label>Ball size <span class="val" id="val-ball">1.00×</span>
-                <input id="sl-ball" type="range" min="0.3" max="3" step="0.05" value="1" />
-              </label>
-              <div class="hint">Per-jet inlets:</div>
-              <div id="inlets-host"></div>
-            </div>
-          </section>
-
-          <section class="block">
-            <h3>Physics</h3>
-            <div class="row">
-              <button id="btn-mrt" class="btn btn-toggle">Collision: BGK</button>
-              <button id="btn-les" class="btn btn-toggle">Turb: Off</button>
-              <button id="btn-slip" class="btn btn-toggle">Walls: No-slip</button>
-            </div>
-            <button class="adv-chip" data-adv="phys-adv">Advanced ▾</button>
-            <div class="adv" id="phys-adv" hidden>
-              <label>Gravity X <span class="val" id="val-grav-x">0.000</span>
-                <input id="sl-grav-x" type="range" min="-0.001" max="0.001" step="0.00005" value="0" />
-              </label>
-              <label>Gravity Y <span class="val" id="val-grav-y">0.000</span>
-                <input id="sl-grav-y" type="range" min="-0.001" max="0.001" step="0.00005" value="0" />
-              </label>
-              <label>Gravity Z <span class="val" id="val-grav-z">0.000</span>
-                <input id="sl-grav-z" type="range" min="-0.001" max="0.001" step="0.00005" value="0" />
-              </label>
-            </div>
-          </section>
-
-          <section class="block">
-            <h3>Time</h3>
-            <div class="row">
-              <button id="btn-play" class="btn">⏸ Pause</button>
-              <button id="btn-step" class="btn" disabled>▶| Step</button>
-              <button id="btn-slowmo" class="btn btn-toggle">Slow-mo</button>
-            </div>
-            <label>Sim speed <span class="val" id="val-speed-mul"></span>
-              <input id="sl-speed-mul" type="range" min="0.1" max="4" step="0.05" />
-            </label>
-            <div class="row"><button id="btn-reset" class="btn btn-danger">Reset flow</button></div>
-          </section>
-
-          <section class="block">
-            <h3>Inject</h3>
-            <div class="row">
-              <button id="btn-inject" class="btn btn-toggle">Inject: Off</button>
-              <button id="btn-inject-mode" class="btn" disabled>Mode: Impulse</button>
-            </div>
-            <div class="hint">Click+drag on canvas while active.</div>
-          </section>
-        </div>
-
-        <!-- ANALYSE ─────────────────────── -->
-        <div class="phase-panel" data-phase="analyse" hidden>
-
-          <section class="block">
-            <h3>Telemetry</h3>
-            <div class="readout">
-              <div><span class="lbl">Cd</span><span id="rd-cd">—</span></div>
-              <div><span class="lbl">Cl</span><span id="rd-cl">—</span></div>
-              <div><span class="lbl">Re</span><span id="rd-rey">—</span></div>
-              <div><span class="lbl">fps</span><span id="rd-fps">—</span></div>
-            </div>
-          </section>
-
-          <section class="block">
-            <h3>Slice</h3>
-            <div class="hint">Switch to the <strong>Slice</strong> view tab to see the slice fill the viewport.</div>
-            <div class="row">
-              <label class="inline">Axis</label>
-              <select id="sel-slice-axis">
-                <option value="x">X (perp. to flow)</option>
-                <option value="y" selected>Y (horizontal)</option>
-                <option value="z">Z (vertical along flow)</option>
-              </select>
-            </div>
-            <div class="row">
-              <label class="inline">Field</label>
-              <select id="sel-slice-field">
-                <option value="velocity" selected>Velocity</option>
-                <option value="pressure">Pressure</option>
-                <option value="vorticity">Vorticity</option>
-              </select>
-            </div>
-            <label>Position <span class="val" id="val-slice-pos"></span>
-              <input id="sl-slice-pos" type="range" min="0" max="1" step="0.005" value="0.5" />
-            </label>
-            <label class="checkbox"><input id="cb-slice-mask" type="checkbox" /><span>Mask 3D view to slice</span></label>
-          </section>
-
-          <section class="block">
-            <h3>Physics tests</h3>
-            <div class="row">
-              <button id="btn-run-tests" class="btn">Run all</button>
-              <span id="tests-summary" class="hint"></span>
-            </div>
-            <ul id="tests-results"></ul>
-          </section>
-        </div>
-
-        <footer>
-          <kbd>drag</kbd> orbit · <kbd>scroll</kbd> zoom · <kbd>Space</kbd> pause
-        </footer>
-      </aside>
+    <!-- ── Telemetry chips (bottom-left, floating) ───────────────────────── -->
+    <div id="telemetry-chips">
+      <div class="chip">
+        <span class="chip-lbl">Cd</span>
+        <span class="chip-val" id="chip-cd">—</span>
+      </div>
+      <div class="chip">
+        <span class="chip-lbl">Re</span>
+        <span class="chip-val" id="chip-re">—</span>
+      </div>
+      <div class="chip">
+        <span class="chip-lbl">fps</span>
+        <span class="chip-val" id="chip-fps">—</span>
+      </div>
+      <div class="chip">
+        <span class="chip-lbl">Ma</span>
+        <span class="chip-val" id="chip-ma">—</span>
+      </div>
     </div>
 
-    <!-- Panel collapsed chip (shown when panel is collapsed) -->
-    <button id="panel-reopen-btn" hidden>&#x203A; Panel</button>
-
+    <!-- Drop overlay -->
     <div id="drop-overlay" hidden>
       <span>Drop .glb, .obj or .stl to voxelize as obstacle</span>
-    </div>
-
-    <!-- Floating Cd overlay (top-left). Mirrors the panel readout but big. -->
-    <div id="cd-overlay">
-      <div class="cd-label">Drag coefficient</div>
-      <div class="cd-value" id="cd-overlay-value">—</div>
-      <div class="cd-sub" id="cd-overlay-sub">Cd · live</div>
     </div>
 
     <!-- Full-viewport slice canvas (shown when slice tab is active) -->
@@ -273,7 +280,6 @@
     </div>
 
     <!-- Picture-in-picture slice viewer (hidden by default, used in non-slice tabs) -->
-    <!-- Note: renders to the same slice-canvas as full-viewport mode -->
     <div id="slice-overlay" hidden>
       <div class="slice-title">
         <span id="slice-title-text">Slice</span>
@@ -291,14 +297,8 @@
       #drop-overlay { position:fixed; inset:0; pointer-events:auto; cursor:copy; backdrop-filter:blur(4px); background:rgba(11,180,120,0.12); display:flex; align-items:center; justify-content:center; z-index:100; font-size:1.4rem; color:var(--accent); font-family:var(--mono); letter-spacing:0.05em; }
       #drop-overlay[hidden] { display:none !important; }
 
-      /* ── Cd overlay ── */
-      #cd-overlay { position:fixed; left:24px; top:72px; z-index:50; background:rgba(8,9,14,0.82); border:1px solid rgba(107,240,214,0.18); border-radius:8px; padding:12px 18px; font-family:var(--mono); color:var(--fg-dim); backdrop-filter:blur(10px); box-shadow:0 4px 24px rgba(0,0,0,0.6); pointer-events:none; min-width:140px; }
-      #cd-overlay .cd-label { font-size:0.68rem; letter-spacing:0.14em; text-transform:uppercase; color:var(--accent); margin-bottom:6px; font-family:var(--sans); }
-      #cd-overlay .cd-value { font-size:2.4rem; font-weight:600; color:var(--fg); line-height:1; font-variant-numeric:tabular-nums; letter-spacing:-0.02em; }
-      #cd-overlay .cd-sub { font-size:0.66rem; letter-spacing:0.08em; color:var(--fg-muted); margin-top:5px; }
-
       /* ── PiP Slice overlay (non-slice tabs) ── */
-      #slice-overlay { position:fixed; left:24px; bottom:24px; z-index:50; background:rgba(8,9,14,0.82); border:1px solid rgba(107,240,214,0.14); border-radius:8px; padding:10px; font-family:var(--mono); color:var(--fg-dim); backdrop-filter:blur(10px); box-shadow:0 4px 24px rgba(0,0,0,0.6); }
+      #slice-overlay { position:fixed; left:24px; bottom:96px; z-index:50; background:rgba(8,9,14,0.82); border:1px solid rgba(107,240,214,0.14); border-radius:8px; padding:10px; font-family:var(--mono); color:var(--fg-dim); backdrop-filter:blur(10px); box-shadow:0 4px 24px rgba(0,0,0,0.6); }
       #slice-overlay[hidden] { display:none !important; }
       #slice-overlay .slice-title { font-size:0.68rem; letter-spacing:0.12em; text-transform:uppercase; margin-bottom:6px; color:var(--accent); }
       #slice-overlay canvas { display:block; border-radius:5px; image-rendering:pixelated; background:#000; }
@@ -306,7 +306,7 @@
       #slice-overlay .legend-bar { flex:1; height:6px; margin:0 8px; border-radius:3px; background:linear-gradient(to right,#1a0b3a,#1a66f2,#1ad5d5,#4df24d,#f8d91a,#ff4019); }
 
       /* ── Full-viewport slice (slice tab) ── */
-      #slice-fullvp { position:fixed; inset:48px 0 0 0; z-index:30; display:flex; flex-direction:column; align-items:center; justify-content:center; background:rgba(7,7,11,0.96); }
+      #slice-fullvp { position:fixed; inset:0; z-index:30; display:flex; flex-direction:column; align-items:center; justify-content:center; background:rgba(4,5,10,0.96); }
       #slice-fullvp[hidden] { display:none !important; }
       #slice-fullvp .slice-vp-header { display:flex; align-items:center; gap:24px; margin-bottom:16px; }
       #slice-fullvp #slice-vp-title { font-family:var(--mono); font-size:0.75rem; letter-spacing:0.14em; text-transform:uppercase; color:var(--accent); }
@@ -314,31 +314,26 @@
       #slice-fullvp .legend-bar { width:120px; height:6px; border-radius:3px; background:linear-gradient(to right,#1a0b3a,#1a66f2,#1ad5d5,#4df24d,#f8d91a,#ff4019); }
       #slice-fullvp canvas { max-width:min(80vw, 80vh); max-height:min(80vw, 80vh); width:100%; height:100%; border-radius:6px; image-rendering:pixelated; border:1px solid var(--line); }
 
-      /* ── Panel select + inline labels ── */
-      #panel select { background:var(--panel-2); color:var(--fg); border:1px solid var(--line); padding:7px 10px; border-radius:5px; font-family:var(--sans); font-size:0.82rem; flex:1; outline:none; }
+      /* ── Panel selects and inline labels ── */
+      #panel select { background:rgba(255,255,255,0.05); color:var(--fg); border:1px solid rgba(255,255,255,0.08); padding:7px 10px; border-radius:5px; font-family:var(--sans); font-size:0.82rem; flex:1; outline:none; }
       #panel select:focus { border-color:var(--accent); }
       #panel label.inline { font-size:0.78rem; margin-right:6px; min-width:38px; color:var(--fg-dim); }
       #panel label.checkbox { display:flex; align-items:center; gap:8px; font-size:0.8rem; cursor:pointer; }
       #panel label.checkbox input { width:14px; height:14px; cursor:pointer; accent-color:var(--accent); }
       #panel details.inlets-advanced { margin-top:8px; font-size:0.8rem; }
       #panel details.inlets-advanced summary { cursor:pointer; color:var(--fg-dim); padding:4px 0; }
-      #panel .inlet-row { border-top:1px solid var(--line); padding:6px 0; }
+      #panel .inlet-row { border-top:1px solid rgba(255,255,255,0.06); padding:6px 0; }
       #panel .inlet-row .inlet-head { display:flex; align-items:center; }
       #panel .inlet-row .inlet-slider { display:block; margin-top:4px; font-size:0.76rem; color:var(--fg-dim); }
       #panel .inlet-row .inlet-slider .val { float:right; color:var(--fg); font-family:var(--mono); }
       #panel .inlet-row .inlet-slider input[type=range] { width:100%; margin-top:2px; }
       #tests-results { list-style:none; padding:0; margin:6px 0 0 0; font-size:0.74rem; font-family:var(--mono); }
-      #tests-results li { padding:3px 0; display:flex; justify-content:space-between; gap:6px; border-bottom:1px solid var(--line); }
+      #tests-results li { padding:3px 0; display:flex; justify-content:space-between; gap:6px; border-bottom:1px solid rgba(255,255,255,0.05); }
       #tests-results li .name { flex:1; color:var(--fg-dim); }
       #tests-results li.pass .name::before { content:'✓ '; color:var(--accent); }
       #tests-results li.fail .name::before { content:'✗ '; color:var(--danger); }
       #tests-results li .value { color:var(--fg-muted); font-variant-numeric:tabular-nums; }
       #tests-summary { color:var(--fg-dim); font-size:0.78rem; }
-
-      /* ── Panel reopen chip ── */
-      #panel-reopen-btn { position:fixed; right:0; top:50%; transform:translateY(-50%); z-index:60; background:var(--panel-2); color:var(--accent); border:1px solid var(--line); border-right:none; border-radius:6px 0 0 6px; padding:12px 6px; font-size:0.85rem; cursor:pointer; writing-mode:vertical-lr; letter-spacing:0.1em; }
-      #panel-reopen-btn[hidden] { display:none !important; }
-      #panel-reopen-btn:hover { background:var(--panel); border-color:var(--accent); }
     </style>
 
     <script>
@@ -364,54 +359,6 @@
           chip.classList.toggle('open', open);
         });
       });
-
-      // Panel collapse/expand
-      (function() {
-        const panel = document.getElementById('panel');
-        const handle = document.getElementById('panel-resize-handle');
-        const collapseBtn = document.getElementById('panel-collapse-btn');
-        const reopenBtn = document.getElementById('panel-reopen-btn');
-        const app = document.getElementById('app');
-
-        collapseBtn.addEventListener('click', () => {
-          panel.classList.add('collapsed-panel');
-          reopenBtn.hidden = false;
-          handle.style.display = 'none';
-        });
-        reopenBtn.addEventListener('click', () => {
-          panel.classList.remove('collapsed-panel');
-          reopenBtn.hidden = true;
-          handle.style.display = '';
-        });
-
-        // Drag-resize handle
-        let dragging = false;
-        let startX = 0;
-        let startW = 0;
-        handle.addEventListener('mousedown', e => {
-          dragging = true;
-          startX = e.clientX;
-          startW = panel.offsetWidth;
-          document.body.style.cursor = 'col-resize';
-          document.body.style.userSelect = 'none';
-        });
-        document.addEventListener('mousemove', e => {
-          if (!dragging) return;
-          const delta = startX - e.clientX; // moving left increases panel width
-          const newW = Math.max(280, Math.min(600, startW + delta));
-          panel.style.width = newW + 'px';
-          handle.style.right = newW + 'px';
-          // Update footer width
-          const footer = panel.querySelector('footer');
-          if (footer) footer.style.width = newW + 'px';
-        });
-        document.addEventListener('mouseup', () => {
-          if (!dragging) return;
-          dragging = false;
-          document.body.style.cursor = '';
-          document.body.style.userSelect = '';
-        });
-      })();
     </script>
     <script type="module" src="/src/main.ts"></script>
   </body>

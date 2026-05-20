@@ -1605,13 +1605,31 @@ export class App {
 
     if (now - this.lastFpsUpdate >= 500) {
       const fps = (this.frameCount * 1000) / (now - this.lastFpsUpdate);
+
+      // Analyse tab readout (existing IDs — keep working)
       const fpsEl = document.getElementById('rd-fps');
       if (fpsEl) fpsEl.textContent = fps.toFixed(0);
       const cd = this.dragCalc?.getLastCd() ?? 0;
       const cdEl = document.getElementById('rd-cd');
       if (cdEl) cdEl.textContent = cd.toFixed(2);
-      const cdOverlay = document.getElementById('cd-overlay-value');
-      if (cdOverlay) cdOverlay.textContent = cd.toFixed(2);
+
+      // Floating telemetry chips (new)
+      const chipCd = document.getElementById('chip-cd');
+      if (chipCd) chipCd.textContent = cd > 0 ? cd.toFixed(2) : '—';
+      const chipFps = document.getElementById('chip-fps');
+      if (chipFps) chipFps.textContent = fps.toFixed(0);
+      const chipRe = document.getElementById('chip-re');
+      if (chipRe) {
+        const re = computeRe(this.config.uIn, this.config.visc, this.config.N, this.lbm?.charLengthCells);
+        chipRe.textContent = re >= 1000 ? (re / 1000).toFixed(1) + 'k' : re.toFixed(0);
+      }
+      const chipMa = document.getElementById('chip-ma');
+      if (chipMa) {
+        // Mach number: u_lattice / c_s where c_s = 1/√3 ≈ 0.577
+        const ma = this.config.uIn / (1 / Math.sqrt(3));
+        chipMa.textContent = ma.toFixed(3);
+      }
+
       this.frameCount = 0;
       this.lastFpsUpdate = now;
     }
