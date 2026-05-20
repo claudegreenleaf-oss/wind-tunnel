@@ -449,3 +449,52 @@ kbd {
   #cd-overlay { top: 60px; }
   #panel-collapse-btn { display: none; }
 }
+
+/* ── Phase tabs (panel-internal) ─────────────────────── */
+.phase-tabs {
+  display: flex;
+  margin: 8px 12px 0;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 3px;
+  gap: 3px;
+}
+.phase-tab {
+  flex: 1; background: transparent; border: none;
+  color: var(--fg-dim); font-family: var(--sans);
+  font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; padding: 7px 0; border-radius: 4px;
+  cursor: pointer; transition: color .15s, background .15s;
+}
+.phase-tab:hover { color: var(--fg); }
+.phase-tab.active { background: var(--accent); color: #001; }
+
+.phase-panel { padding: 4px 0 12px; }
+.phase-panel[hidden] { display: none !important; }
+
+/* ── Block (replaces .group) ─────────────────────────── */
+.block { padding: 14px 18px 6px; border-top: 1px solid var(--line); }
+.block:first-of-type { border-top: none; }
+.block h3 {
+  font-family: var(--sans); font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.13em;
+  color: var(--fg-muted); margin: 0 0 10px;
+}
+
+/* ── Advanced chip + body ────────────────────────────── */
+.adv-chip {
+  background: transparent; border: 1px solid var(--line);
+  color: var(--fg-dim); font-family: var(--sans); font-size: 10.5px;
+  padding: 4px 10px; border-radius: 999px; cursor: pointer;
+  letter-spacing: 0.06em; margin: 2px 0 8px;
+  transition: color .15s, border-color .15s;
+}
+.adv-chip:hover { color: var(--accent); border-color: var(--accent); }
+.adv-chip.open { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
+.adv { padding-top: 4px; border-top: 1px dashed var(--line); margin-top: -4px; }
+.adv[hidden] { display: none !important; }
+
+/* ── Danger button ───────────────────────────────────── */
+.btn.btn-danger { color: var(--danger); border-color: rgba(255,94,108,0.3); }
+.btn.btn-danger:hover { background: rgba(255,94,108,0.1); border-color: var(--danger); }

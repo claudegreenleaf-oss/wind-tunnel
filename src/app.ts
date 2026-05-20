@@ -638,12 +638,10 @@ export class App {
     this.wireInject();
 
     // Slice viewer controls.
-    const sliceBtn = q<HTMLButtonElement>('#btn-slice');
     const sliceAxis = q<HTMLSelectElement>('#sel-slice-axis');
     const sliceField = q<HTMLSelectElement>('#sel-slice-field');
     const slicePos = q<HTMLInputElement>('#sl-slice-pos');
     const slicePosVal = q<HTMLSpanElement>('#val-slice-pos');
-    const sliceOverlay = document.getElementById('slice-overlay');
     const sliceTitle = q<HTMLSpanElement>('#slice-title-text');
     const sliceLegendLo = q<HTMLSpanElement>('#slice-legend-lo');
     const sliceLegendHi = q<HTMLSpanElement>('#slice-legend-hi');
@@ -684,21 +682,6 @@ export class App {
     };
     sliceMaskCb.addEventListener('change', pushSliceConfig);
 
-    sliceBtn.addEventListener('click', () => {
-      this.sliceActive = !this.sliceActive;
-      sliceBtn.textContent = this.sliceActive ? 'Slice: On' : 'Slice: Off';
-      sliceBtn.classList.toggle('active', this.sliceActive);
-      // When the slice button is toggled on, switch to the Slice tab so the
-      // full-viewport canvas is visible. When toggled off, revert to Particles.
-      const sliceTab = document.querySelector<HTMLButtonElement>('#tab-bar .tab[data-mode="slice"]');
-      const particlesTab = document.querySelector<HTMLButtonElement>('#tab-bar .tab[data-mode="particles"]');
-      if (this.sliceActive) {
-        sliceTab?.click();
-      } else {
-        particlesTab?.click();
-      }
-      if (this.sliceIndicator) this.sliceIndicator.visible = this.sliceActive;
-    });
     sliceAxis.addEventListener('change', pushSliceConfig);
     sliceField.addEventListener('change', pushSliceConfig);
     slicePos.addEventListener('input', pushSliceConfig);
@@ -733,12 +716,22 @@ export class App {
         else sliceFullVp.setAttribute('hidden', '');
       }
 
-      // Particles: reset streamlines when switching back so they start fresh
+      // Slice tab is the single source of truth for sliceActive
+      this.sliceActive = (mode === 'slice');
+      if (this.sliceIndicator) this.sliceIndicator.visible = this.sliceActive;
+
+      // Auto-inject dye when Volumetric tab is active so the volume is non-empty
+      if (this.dye) {
+        this.dye.injectAmount = (mode === 'volume') ? 0.7 : this.config.dyeAmount;
+      }
+
+      // Reset streamline seeds on switch so ribbons start fresh; show warming hint
       if (mode === 'streamlines' && this.streamlines) {
         const { sx, sy, sz } = this.latticeWorld();
         const aabbMin = new THREE.Vector3(-sx * 0.5, -sy * 0.5, -sz * 0.5);
         const aabbMax = new THREE.Vector3( sx * 0.5,  sy * 0.5,  sz * 0.5);
         this.streamlines.resetSeeds(aabbMin, aabbMax);
+        showToast('Seeding streamlines…');
       }
     };
 
