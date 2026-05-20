@@ -10,7 +10,7 @@ struct Params {
   useMRT: u32,
   useLES: u32,
   freeSlip: u32,
-  _pad1: u32,
+  useRegularized: u32,
   // Mirrors lbm3d.wgsl — kept in sync so the same uniform buffer can be
   // bound to either shader. init3d doesn't use inlets but needs the layout.
   inlets: array<vec4<f32>, 4>,

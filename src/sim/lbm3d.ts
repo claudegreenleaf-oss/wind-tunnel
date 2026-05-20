@@ -33,9 +33,10 @@ export class LBM3D {
     { enabled: false, yFrac: 0.5, zFrac: 0.5, radius: 0.12 },
   ];
   gravity: [number, number, number] = [0, 0, 0];
-  useMRT = 0;   // 0 = BGK, 1 = TRT
+  useMRT = 0;   // 0 = BGK, 1 = TRT (ignored when useRegularized = 1)
   useLES = 0;   // 0 = off, 1 = Smagorinsky LES
   freeSlip = 0; // 0 = no-slip, 1 = free-slip
+  useRegularized = 0; // 0 = off, 1 = regularized BGK (Latt & Chopard)
 
   // Resources (rebuilt on resize)
   private fA!: GPUBuffer;
@@ -243,7 +244,7 @@ export class LBM3D {
     u32[12] = this.useMRT;
     u32[13] = this.useLES;
     u32[14] = this.freeSlip;
-    u32[15] = 0;
+    u32[15] = this.useRegularized;
     for (let k = 0; k < MAX_INLETS; k++) {
       const inlet = this.inlets[k] ?? { enabled: false, yFrac: 0.5, zFrac: 0.5, radius: 0 };
       const base = 16 + k * 4;

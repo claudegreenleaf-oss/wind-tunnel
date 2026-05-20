@@ -29,6 +29,7 @@ export interface SimConfig {
   useMRT: boolean;    // true = TRT collision, false = BGK
   useLES: boolean;    // true = Smagorinsky LES turbulence model
   freeSlip: boolean;  // true = free-slip walls, false = no-slip (bounce-back)
+  useRegularized: boolean; // true = regularized BGK (overrides useMRT)
   // Shape
   shapeId: string;
   // Obstacle orientation (Euler angles, deg) + uniform scale multiplier.
@@ -59,6 +60,7 @@ export function defaultConfig(): SimConfig {
     gravity: [0, 0, 0],
     useMRT: false,
     useLES: false,
+    useRegularized: false,
     freeSlip: false,
     shapeId: 'sphere',
     yawDeg: 0,

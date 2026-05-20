@@ -516,13 +516,35 @@ export class App {
     gravY.addEventListener('input', updateGrav);
     gravZ.addEventListener('input', updateGrav);
 
-    // Physics: MRT/TRT toggle
+    // Physics: collision-operator cycle (BGK → TRT → Regularized).
+    // Regularized BGK is Latt & Chopard's stress-projection variant, ported
+    // from MarcosAsh/Lattice_Fluid_Dynamics (MIT). It costs the same as TRT
+    // but is far more stable at moderate-to-high Re because it projects out
+    // unstable higher-order non-equilibrium moments each step.
     const mrtBtn = q<HTMLButtonElement>('#btn-mrt');
+    const collisionMode = (): 'BGK' | 'TRT' | 'Regularized' => {
+      if (this.config.useRegularized) return 'Regularized';
+      if (this.config.useMRT) return 'TRT';
+      return 'BGK';
+    };
+    const setCollisionMode = (m: 'BGK' | 'TRT' | 'Regularized') => {
+      this.config.useMRT = (m === 'TRT');
+      this.config.useRegularized = (m === 'Regularized');
+      if (this.lbm) {
+        this.lbm.useMRT = this.config.useMRT ? 1 : 0;
+        this.lbm.useRegularized = this.config.useRegularized ? 1 : 0;
+      }
+      mrtBtn.textContent = `Collision: ${m}`;
+      mrtBtn.classList.toggle('active', m !== 'BGK');
+    };
+    // Initialise label from current config.
+    setCollisionMode(collisionMode());
     mrtBtn.addEventListener('click', () => {
-      this.config.useMRT = !this.config.useMRT;
-      if (this.lbm) this.lbm.useMRT = this.config.useMRT ? 1 : 0;
-      mrtBtn.textContent = this.config.useMRT ? 'Collision: TRT' : 'Collision: BGK';
-      mrtBtn.classList.toggle('active', this.config.useMRT);
+      const next: 'BGK' | 'TRT' | 'Regularized' =
+        collisionMode() === 'BGK' ? 'TRT'
+        : collisionMode() === 'TRT' ? 'Regularized'
+        : 'BGK';
+      setCollisionMode(next);
     });
 
     // Physics: LES toggle

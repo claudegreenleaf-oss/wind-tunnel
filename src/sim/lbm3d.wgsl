@@ -21,10 +21,10 @@ struct Params {
   aoaRad:   f32,
   inletR:   f32,        // legacy single-inlet radius (unused by the multi-inlet loop)
   gravity:  vec4<f32>,  // gx, gy, gz, pad
-  useMRT:   u32,        // 0=BGK, 1=TRT
+  useMRT:   u32,        // 0=BGK, 1=TRT (ignored when useRegularized=1)
   useLES:   u32,        // 0=off, 1=Smagorinsky
   freeSlip: u32,        // 0=no-slip, 1=free-slip
-  _pad1:    u32,
+  useRegularized: u32,  // 0=off, 1=regularized BGK (overrides useMRT)
   // 4 inlets: each vec4 = (yFrac, zFrac, radius, enabledMask 0/1).
   inlets:   array<vec4<f32>, 4>,
 };
@@ -202,6 +202,25 @@ fn cs_step(@builtin(global_invocation_id) gid: vec3<u32>) {
     f[i] = fi;
   }
 
+  // ===== Zou-He pressure outlet at +X face =====
+  // Ported from MarcosAsh/Lattice_Fluid_Dynamics (MIT) `lbm_collide.comp:377-409`.
+  // Replaces the zero-gradient (clamp-to-self) outlet with anti-bounce-back
+  // so vortex / acoustic waves leave the domain instead of reflecting back.
+  // Assumes fully developed flow: uy ≈ uz ≈ 0 at the boundary; rho = 1.
+  if (gid.x == dims.x - 1u) {
+    let knowns_0   = f[0]  + f[3]  + f[4]  + f[5]  + f[6]
+                   + f[15] + f[16] + f[17] + f[18];
+    let knowns_pos = f[1]  + f[7]  + f[9]  + f[11] + f[13];
+    let rho_out = 1.0;
+    let ux_out  = -1.0 + (knowns_0 + 2.0 * knowns_pos) / rho_out;
+    // Reconstruct the 5 unknown distributions (those with e.x = -1).
+    f[2]  = f[1]  - (1.0 / 3.0) * rho_out * ux_out;
+    f[10] = f[7]  - (1.0 / 6.0) * rho_out * ux_out;
+    f[8]  = f[9]  - (1.0 / 6.0) * rho_out * ux_out;
+    f[14] = f[11] - (1.0 / 6.0) * rho_out * ux_out;
+    f[12] = f[13] - (1.0 / 6.0) * rho_out * ux_out;
+  }
+
   // Macroscopics
   var rho: f32 = 0.0;
   var mom: vec3<f32> = vec3<f32>(0.0);
@@ -296,6 +315,43 @@ fn cs_step(@builtin(global_invocation_id) gid: vec3<u32>) {
         let feq_sym  = (feqi + feqj) * 0.5;
         let feq_asym = (feqi - feqj) * 0.5;
         f[i] = fi - omega_use * (fi_sym - feq_sym) - omega_minus * (fi_asym - feq_asym);
+      }
+    } else if (params.useRegularized == 1u) {
+      // ===== Regularized BGK (Latt & Chopard 2006) =====
+      // Ported from MarcosAsh/Lattice_Fluid_Dynamics (MIT) `lbm_collide.comp:488-545`.
+      // Reconstruct each f_i from f_eq + the projection of the non-equilibrium
+      // stress tensor onto the 2nd-order Hermite basis. Filters out unstable
+      // higher-order moments — gives MRT-like stability for ~30 LOC and one
+      // collision-rate uniform. Identical to BGK at the macroscopic level.
+
+      // Step 1: non-equilibrium stress Π_neq_ab = Σ_i e_ia e_ib (f_i - f_eq_i)
+      var Pxx : f32 = 0.0; var Pyy : f32 = 0.0; var Pzz : f32 = 0.0;
+      var Pxy : f32 = 0.0; var Pxz : f32 = 0.0; var Pyz : f32 = 0.0;
+      for (var i = 0u; i < 19u; i = i + 1u) {
+        let f_neq = f[i] - feq(i, rho, u);
+        let e = vec3<f32>(eVec(i));
+        Pxx = Pxx + e.x * e.x * f_neq;
+        Pyy = Pyy + e.y * e.y * f_neq;
+        Pzz = Pzz + e.z * e.z * f_neq;
+        Pxy = Pxy + e.x * e.y * f_neq;
+        Pxz = Pxz + e.x * e.z * f_neq;
+        Pyz = Pyz + e.y * e.z * f_neq;
+      }
+      // Step 2: regularized f = f_eq + (1 - omega) * f_neq_reg
+      // f_neq_reg_i = (w_i / 2 c_s^4) * Q_iab Π_ab,  c_s^2 = 1/3 ⇒ 1/(2 c_s^4) = 4.5
+      let cs2 : f32 = 1.0 / 3.0;
+      let inv_2cs4 : f32 = 4.5;
+      for (var i = 0u; i < 19u; i = i + 1u) {
+        let feq_i = feq(i, rho, u);
+        let e = vec3<f32>(eVec(i));
+        let QP = (e.x * e.x - cs2) * Pxx
+               + (e.y * e.y - cs2) * Pyy
+               + (e.z * e.z - cs2) * Pzz
+               + 2.0 * e.x * e.y * Pxy
+               + 2.0 * e.x * e.z * Pxz
+               + 2.0 * e.y * e.z * Pyz;
+        let f_neq_reg = weight(i) * inv_2cs4 * QP;
+        f[i] = feq_i + (1.0 - omega_use) * f_neq_reg;
       }
     } else {
       // BGK collision
