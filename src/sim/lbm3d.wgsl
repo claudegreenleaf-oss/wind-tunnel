@@ -202,25 +202,6 @@ fn cs_step(@builtin(global_invocation_id) gid: vec3<u32>) {
     f[i] = fi;
   }
 
-  // ===== Zou-He pressure outlet at +X face =====
-  // Ported from MarcosAsh/Lattice_Fluid_Dynamics (MIT) `lbm_collide.comp:377-409`.
-  // Replaces the zero-gradient (clamp-to-self) outlet with anti-bounce-back
-  // so vortex / acoustic waves leave the domain instead of reflecting back.
-  // Assumes fully developed flow: uy ≈ uz ≈ 0 at the boundary; rho = 1.
-  if (gid.x == dims.x - 1u) {
-    let knowns_0   = f[0]  + f[3]  + f[4]  + f[5]  + f[6]
-                   + f[15] + f[16] + f[17] + f[18];
-    let knowns_pos = f[1]  + f[7]  + f[9]  + f[11] + f[13];
-    let rho_out = 1.0;
-    let ux_out  = -1.0 + (knowns_0 + 2.0 * knowns_pos) / rho_out;
-    // Reconstruct the 5 unknown distributions (those with e.x = -1).
-    f[2]  = f[1]  - (1.0 / 3.0) * rho_out * ux_out;
-    f[10] = f[7]  - (1.0 / 6.0) * rho_out * ux_out;
-    f[8]  = f[9]  - (1.0 / 6.0) * rho_out * ux_out;
-    f[14] = f[11] - (1.0 / 6.0) * rho_out * ux_out;
-    f[12] = f[13] - (1.0 / 6.0) * rho_out * ux_out;
-  }
-
   // Macroscopics
   var rho: f32 = 0.0;
   var mom: vec3<f32> = vec3<f32>(0.0);
