@@ -143,8 +143,8 @@
   "hotPaths": [
     {
       "path": "src/app.ts",
-      "accessCount": 9,
-      "lastAccessed": 1779380136347,
+      "accessCount": 16,
+      "lastAccessed": 1779381429426,
       "type": "file"
     },
     {
@@ -155,14 +155,26 @@
     },
     {
       "path": "src/render/fluidSurface.ts",
-      "accessCount": 5,
-      "lastAccessed": 1779380121365,
+      "accessCount": 6,
+      "lastAccessed": 1779381362806,
+      "type": "file"
+    },
+    {
+      "path": "index.html",
+      "accessCount": 3,
+      "lastAccessed": 1779381391587,
       "type": "file"
     },
     {
       "path": "src/obstacles/voxelizeAnyMesh.ts",
       "accessCount": 2,
       "lastAccessed": 1779379395295,
+      "type": "file"
+    },
+    {
+      "path": "src/sim/dragCoeff.ts",
+      "accessCount": 2,
+      "lastAccessed": 1779381437358,
       "type": "file"
     },
     {
@@ -220,12 +232,6 @@
       "type": "file"
     },
     {
-      "path": "index.html",
-      "accessCount": 1,
-      "lastAccessed": 1779379164207,
-      "type": "file"
-    },
-    {
       "path": ".playwright-mcp/cylinder-after-fix.png",
       "accessCount": 1,
       "lastAccessed": 1779380170940,
@@ -235,6 +241,84 @@
       "path": ".playwright-mcp/naca-2412-after-fix.png",
       "accessCount": 1,
       "lastAccessed": 1779380193525,
+      "type": "file"
+    },
+    {
+      "path": ".playwright-mcp/01-sphere-back-on.png",
+      "accessCount": 1,
+      "lastAccessed": 1779380518453,
+      "type": "file"
+    },
+    {
+      "path": ".playwright-mcp/02-sphere-side-elevated.png",
+      "accessCount": 1,
+      "lastAccessed": 1779380548183,
+      "type": "file"
+    },
+    {
+      "path": ".playwright-mcp/03-sphere-top-down.png",
+      "accessCount": 1,
+      "lastAccessed": 1779380603295,
+      "type": "file"
+    },
+    {
+      "path": "src/sim/lbm3d.wgsl",
+      "accessCount": 1,
+      "lastAccessed": 1779380644041,
+      "type": "file"
+    },
+    {
+      "path": ".playwright-mcp/04-sphere-fullinlet-topdown.png",
+      "accessCount": 1,
+      "lastAccessed": 1779380692628,
+      "type": "file"
+    },
+    {
+      "path": ".playwright-mcp/05-sphere-closeup.png",
+      "accessCount": 1,
+      "lastAccessed": 1779380722606,
+      "type": "file"
+    },
+    {
+      "path": ".playwright-mcp/06-cylinder-Re286-topdown.png",
+      "accessCount": 1,
+      "lastAccessed": 1779380843229,
+      "type": "file"
+    },
+    {
+      "path": ".playwright-mcp/07-cylinder-Re800-top.png",
+      "accessCount": 1,
+      "lastAccessed": 1779380954631,
+      "type": "file"
+    },
+    {
+      "path": ".playwright-mcp/08-cylinder-streamlines-top.png",
+      "accessCount": 1,
+      "lastAccessed": 1779380985839,
+      "type": "file"
+    },
+    {
+      "path": ".playwright-mcp/09-naca0012-aoa0-side.png",
+      "accessCount": 1,
+      "lastAccessed": 1779381047650,
+      "type": "file"
+    },
+    {
+      "path": ".playwright-mcp/10-naca0012-pitch10.png",
+      "accessCount": 1,
+      "lastAccessed": 1779381090824,
+      "type": "file"
+    },
+    {
+      "path": ".playwright-mcp/11-naca0012-pitch-neg10.png",
+      "accessCount": 1,
+      "lastAccessed": 1779381173102,
+      "type": "file"
+    },
+    {
+      "path": ".playwright-mcp/12-slice-vorticity-z.png",
+      "accessCount": 1,
+      "lastAccessed": 1779381223891,
       "type": "file"
     }
   ],

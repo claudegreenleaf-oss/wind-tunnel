@@ -20,6 +20,7 @@ export class LBM2D {
   uIn = 0.08;
   visc = 0.005;
   inletR = 0.18;
+  inletYFrac = 0.5;
   shape: Scene2D = 'circle';
   obstacleXFrac = 0.3;
   obstacleScale = 1;
@@ -65,6 +66,17 @@ export class LBM2D {
     this.shape = shape;
     this.obstacleXFrac = xFrac;
     this.obstacleScale = Math.max(0.1, scale);
+    // Scene-specific inlet positioning: cavity's floor sits at y = 35 % of H,
+    // so the inlet has to be ABOVE that or it tries to drive flow into the
+    // solid sub-floor cells and the visible freestream stays mostly empty.
+    if (shape === 'cavity') {
+      this.inletYFrac = 0.68;     // centred in the freestream band [0.35, 1.0]
+      this.inletR     = 0.28;
+    } else {
+      this.inletYFrac = 0.5;
+      this.inletR     = 0.45;
+    }
+    this.writeParams();
     this.voxelize();
     this.runInit();
   }
@@ -81,7 +93,7 @@ export class LBM2D {
     u32[0] = this.W; u32[1] = this.H; u32[2] = 0; u32[3] = 0;
     f32[4] = this.omegaFromVisc();
     f32[5] = this.uIn;
-    f32[6] = 0;
+    f32[6] = this.inletYFrac;
     f32[7] = this.inletR;
     this.device.queue.writeBuffer(this.paramsBuf, 0, buf);
   }

@@ -682,6 +682,17 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
   let seed = u.params.z;
 
   var needsReseed : bool = p.w >= maxAge;
+  // NaN / runaway guard: a divergent LBM cell or wraparound math can leave a
+  // particle with a non-finite or absurdly large position, after which every
+  // subsequent advection step also writes NaN and the particle silently
+  // disappears (NaN comparisons fail so the "exited the AABB" check never
+  // triggers). Detect either case and force a clean reseed.
+  if !needsReseed {
+    let pxyz = p.xyz;
+    let isFinite = all(pxyz == pxyz);
+    let isBounded = all(abs(pxyz) < vec3(1.0e6));
+    if (!isFinite || !isBounded) { needsReseed = true; }
+  }
   if !needsReseed {
     // Multi-step advection (T4): 8 sub-steps of dt/8 per frame. This resolves
     // curved flow paths around the obstacle cleanly instead of smearing.
@@ -716,7 +727,12 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
       }
       // Sample velocity at current cell.
       let macros = textureSampleLevel(macrosTex, samp, uvwSub, 0.0);
-      let vel_world = macros.xyz * (aabbSize / u.dims.xyz);
+      var vel_world = macros.xyz * (aabbSize / u.dims.xyz);
+      // Clamp velocity to ≤ 8 % of the AABB per substep so a momentarily-
+      // diverging LBM cell can't send a particle off to infinity in one step.
+      // Anything past this cap is a numerical artefact, not real fluid motion.
+      let vMax = aabbSize * 0.08;
+      vel_world = clamp(vel_world, -vMax, vMax);
       var nextPos = pos + vel_world * subDt;
 
       // ANTI-TUNNELING / NO-PHASING: check the LBM solid mask at the

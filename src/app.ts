@@ -124,10 +124,13 @@ export class App {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.target.set(0, 0, 0);
-    // (2D mode: leave orbit unlocked until we're sure the default top-down
-    // pose actually shows the scene properly; tightening to a fixed pose
-    // before the rest of the pipeline is verified just makes debugging
-    // harder.)
+    if (this.config.mode2D) {
+      // Lock orbit to the top-down pose. Pan + zoom remain available so the
+      // user can frame whichever part of the domain they want.
+      this.controls.enableRotate = false;
+      this.controls.minPolarAngle = 0;
+      this.controls.maxPolarAngle = 0;
+    }
 
     // Lighting: key + rim, plus a soft ambient.
     this.scene.add(new THREE.AmbientLight(0xffffff, 0.15));
@@ -166,12 +169,21 @@ export class App {
         // the Z dimension is thin and most of that disc lands outside the
         // LBM2D's inlet band, so almost every particle reseed-loops every
         // frame. Bumping the radius to 0.45 covers most of the Y band.
-        this.config.inletRadius = 0.45;
-        this.config.inlets[0]!.radius = 0.45;
+        // Scene-specific inlet placement so the existing 3D particle spawner
+        // (which uses inlets[0].yFrac / radius) lands inside the freestream
+        // band of the LBM2D scene rather than below the cavity floor or wall.
+        if (this.config.scene2D === 'cavity') {
+          this.config.inlets[0]!.yFrac = 0.68;
+          this.config.inlets[0]!.radius = 0.28;
+          this.config.inletRadius = 0.28;
+        } else {
+          this.config.inlets[0]!.yFrac = 0.5;
+          this.config.inlets[0]!.radius = 0.45;
+          this.config.inletRadius = 0.45;
+        }
         const lbm2 = new LBM2D(device, W, H);
         lbm2.uIn = this.config.uIn;
         lbm2.visc = this.config.visc;
-        lbm2.inletR = this.config.inletRadius;
         lbm2.setShape(this.config.scene2D, this.config.obstacleXFrac, this.config.scaleMul);
         this.lbm = lbm2;
       } else {
@@ -398,9 +410,21 @@ export class App {
       const v = scene2DSel.value as 'circle' | 'cavity';
       this.config.scene2D = v;
       try { localStorage.setItem('wt-scene2d', v); } catch {}
+      // Re-aim the particle spawn to land in the new scene's freestream band.
+      if (v === 'cavity') {
+        this.config.inlets[0]!.yFrac = 0.68;
+        this.config.inlets[0]!.radius = 0.28;
+        this.config.inletRadius = 0.28;
+      } else {
+        this.config.inlets[0]!.yFrac = 0.5;
+        this.config.inlets[0]!.radius = 0.45;
+        this.config.inletRadius = 0.45;
+      }
+      this.syncInletsToGpu();
       if (this.lbm instanceof LBM2D) {
         this.lbm.setShape(v, this.config.obstacleXFrac, this.config.scaleMul);
       }
+      this.particles?.resetAllParticles();
     });
 
     const shapeSelect = q<HTMLSelectElement>('#shape-select');
@@ -952,7 +976,7 @@ export class App {
           <input type="range" min="0.05" max="0.95" step="0.005" value="${inlet.zFrac}" data-inlet="${k}" data-field="zFrac" />
         </label>
         <label class="inlet-slider">Size <span class="val">${Math.round(inlet.radius * 100)}%</span>
-          <input type="range" min="0.02" max="0.45" step="0.005" value="${inlet.radius}" data-inlet="${k}" data-field="radius" />
+          <input type="range" min="0.02" max="0.75" step="0.005" value="${inlet.radius}" data-inlet="${k}" data-field="radius" />
         </label>
       `;
       host.appendChild(row);
@@ -1139,9 +1163,14 @@ export class App {
     // the flow — so we order the Euler set so the resulting rotation matches
     // intuition for a wind-tunnel test article.
     m.rotation.set(
-      deg2rad(this.config.rollDeg),       // X = roll (along flow)
-      deg2rad(this.config.yawDeg),        // Y = yaw (vertical)
-      deg2rad(this.config.pitchDeg),      // Z = pitch (side axis)
+      deg2rad(this.config.rollDeg),        // X = roll (along flow)
+      deg2rad(this.config.yawDeg),         // Y = yaw (vertical)
+      -deg2rad(this.config.pitchDeg),      // Z = pitch — negated so positive
+                                           // pitch raises the LE (= +AoA in
+                                           // aerospace convention). Without
+                                           // the sign flip, +10° pitch was
+                                           // rotating the LE DOWN, giving
+                                           // negative lift on a "+AoA" wing.
     );
     m.scale.setScalar(Math.max(0.01, this.config.scaleMul));
     m.updateMatrixWorld(true);
@@ -1338,7 +1367,7 @@ export class App {
     this.obstacleMesh.rotation.set(
       deg2rad(this.config.rollDeg),
       deg2rad(this.config.yawDeg),
-      deg2rad(this.config.pitchDeg),
+      -deg2rad(this.config.pitchDeg),   // positive pitch → LE up (+AoA)
     );
     this.obstacleMesh.scale.setScalar(Math.max(0.01, this.config.scaleMul));
     this.scene.add(this.obstacleMesh);
@@ -1496,6 +1525,19 @@ export class App {
           }
         }
       }
+      // Planform (x-z) silhouette — the projection seen from ABOVE. This is
+      // the conventional reference area for lift coefficient on lifting
+      // surfaces (chord × span for an airfoil). Without it, Cl normalized by
+      // the small frontal area reads 3–8× larger than the physically correct
+      // value for thin wings.
+      let planformCells = 0;
+      for (let x = 0; x < W; x++) {
+        for (let z = 0; z < D; z++) {
+          for (let y = floorRow; y < H; y++) {
+            if (mask[x + y * W + z * W * H] === 1) { planformCells++; break; }
+          }
+        }
+      }
       this.lbm.setMaskBuffer(mask);
       // Kill any particle currently inside the freshly-voxelized mask. The
       // bounding-sphere kill misses cylinder caps / airfoil tips; this
@@ -1503,6 +1545,7 @@ export class App {
       // surface" while waiting to age out.
       this.particles?.killParticlesInsideObstacle();
       this.dragCalc?.setFrontalArea(frontalCells);
+      this.dragCalc?.setPlanformArea(planformCells);
       // Characteristic length ≈ √(frontal area). Drives Reynolds-number
       // display so the HUD shows U·D/ν, not U·N/4·1/ν. For a circular
       // frontal silhouette this equals D·√(π)/2 ≈ 0.886·D, close enough

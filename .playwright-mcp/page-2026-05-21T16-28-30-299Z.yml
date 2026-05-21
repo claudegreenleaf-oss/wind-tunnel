@@ -1,0 +1,85 @@
+- generic [active] [ref=e1]:
+  - tablist [ref=e3]:
+    - button "Particles" [ref=e4] [cursor=pointer]
+    - button "Streamlines" [ref=e5] [cursor=pointer]
+    - button "Slice" [ref=e6] [cursor=pointer]
+  - complementary [ref=e7]:
+    - generic [ref=e10]:
+      - heading "Wind Tunnel" [level=1] [ref=e11]
+      - generic [ref=e12]: WebGPU · D3Q19 · 3D LBM
+    - tablist [ref=e13]:
+      - button "Setup" [ref=e14] [cursor=pointer]
+      - button "Run" [ref=e15] [cursor=pointer]
+      - button "Analyse" [ref=e16] [cursor=pointer]
+    - generic [ref=e17]:
+      - generic [ref=e18]:
+        - heading "Mode" [level=3] [ref=e19]
+        - generic [ref=e20] [cursor=pointer]:
+          - checkbox "2D simulation" [ref=e21]
+          - generic [ref=e22]: 2D simulation
+        - generic [ref=e23]:
+          - generic [ref=e24]: Scene
+          - combobox [ref=e25] [cursor=pointer]:
+            - option "Circle (Karman)" [selected]
+            - option "Floor cavity"
+      - generic [ref=e26]:
+        - heading "Shape" [level=3] [ref=e27]
+        - combobox [ref=e28] [cursor=pointer]:
+          - option "Sphere" [selected]
+          - option "Cube"
+          - option "Cylinder"
+          - option "Cone"
+          - option "Pyramid"
+          - option "Torus"
+          - option "Capsule"
+          - option "Tetrahedron"
+          - option "Octahedron"
+          - option "Dodecahedron"
+          - option "Icosahedron"
+          - option "Teapot"
+          - option "NACA 0006 (thin sym.)"
+          - option "NACA 0012 (sym.)"
+          - option "NACA 0024 (thick sym.)"
+          - option "NACA 2412 (cambered)"
+          - option "NACA 4412 (high lift)"
+          - option "NACA 6412 (max camber)"
+          - option "Custom (uploaded)" [disabled]
+        - generic [ref=e29]:
+          - text: Position
+          - generic [ref=e30]: 30%
+          - slider "Position 30%" [ref=e31]: "0.3"
+        - generic [ref=e32]:
+          - text: Scale
+          - generic [ref=e33]: "1.00"
+          - slider "Scale 1.00" [ref=e34]: "1"
+        - generic [ref=e35]:
+          - text: Yaw
+          - generic [ref=e36]: 0°
+          - slider "Yaw 0°" [ref=e37]: "0"
+        - button "Advanced ▾" [ref=e38] [cursor=pointer]
+      - generic [ref=e39]:
+        - heading "Floor" [level=3] [ref=e40]
+        - generic [ref=e41] [cursor=pointer]:
+          - checkbox "Enable" [ref=e42]
+          - generic [ref=e43]: Enable
+        - generic [ref=e44]:
+          - text: Height
+          - generic [ref=e45]: 0%
+          - slider "Height 0%" [ref=e46]: "0"
+      - generic [ref=e47]:
+        - heading "Resolution" [level=3] [ref=e48]
+        - button "Advanced ▾" [ref=e49] [cursor=pointer]
+    - generic [ref=e50]: drag orbit · scroll zoom · Space pause
+  - generic [ref=e51]:
+    - generic:
+      - generic: Cd
+      - generic: —
+    - generic:
+      - generic: Re
+      - generic: —
+    - generic:
+      - generic: fps
+      - generic: —
+    - generic:
+      - generic: Ma
+      - generic: —

@@ -13,7 +13,7 @@
 
 struct Uniforms {
   dims   : vec4<u32>,    // W, H, _, _
-  scalars: vec4<f32>,    // omega, uIn, _, inletR
+  scalars: vec4<f32>,    // omega, uIn, inletYFrac, inletR
 };
 
 @group(0) @binding(0) var<uniform>                u       : Uniforms;
@@ -145,13 +145,32 @@ fn cs_step(@builtin(global_invocation_id) gid : vec3<u32>) {
     ux  += f[i] * f32(ex(i));
     uy  += f[i] * f32(ey(i));
   }
-  ux = ux / max(rho, 1e-5);
-  uy = uy / max(rho, 1e-5);
+  // NaN / negative-ρ guard. BGK can drive ρ to 0 in regions with large
+  // velocity-gradient × dt; once that happens every downstream calculation
+  // (u, feq, alpha) becomes NaN and the cell stays poisoned forever.
+  if (!(rho > 0.001)) {
+    rho = 1.0; ux = 0.0; uy = 0.0;
+  } else {
+    ux = ux / rho;
+    uy = uy / rho;
+    // Subsonic cap: keep |u| < 0.18 lattice units so BGK stays stable. The
+    // model is incompressible-ish, anything past this is a numerical wave.
+    let usq = ux * ux + uy * uy;
+    let uMax = 0.18;
+    if (usq > uMax * uMax) {
+      let s = uMax / sqrt(usq);
+      ux = ux * s;
+      uy = uy * s;
+    }
+  }
 
-  // Inlet BC (x=0): driven velocity (uIn, 0) within the inlet radius around H/2.
+  // Inlet BC (x=0): driven velocity (uIn, 0) within the inlet radius around
+  // a configurable Y centre. The cavity scene puts its floor low in the
+  // domain and needs the inlet shifted up into the freestream band.
   if (x == 0u) {
+    let cyf  = u.scalars.z * f32(H);
     let inletR = u.scalars.w * f32(H);
-    let dy = f32(y) - 0.5 * f32(H);
+    let dy = f32(y) - cyf;
     if (abs(dy) <= inletR) {
       ux = uIn;
       uy = 0.0;

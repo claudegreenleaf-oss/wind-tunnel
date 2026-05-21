@@ -1479,11 +1479,15 @@ fn fs_obstacle(in : VOut) -> @location(0) vec4f {
   // alive without amplifying noise across the colour ramp every frame.
   let cpLBM = pLattice / denom * 1.5;
 
-  // Direction-based proxy: smooth function of surface normal, no temporal
-  // noise. Heavier weight now compensates for the reduced LBM gain so the
-  // overall Cp range is similar.
+  // Direction-based proxy with a small weight — used only as a baseline tint
+  // before the LBM has built up real pressure variation. A previously larger
+  // weight (0.85) was over-saturating the leading edge of airfoils: it gave
+  // every -X-facing surface element near-maximum red regardless of the actual
+  // pressure (a real +AoA airfoil has its stagnation point shifted onto the
+  // LOWER surface, so the LE itself should NOT be uniformly red). 0.25 keeps
+  // a faint directional cue without overriding genuine LBM Cp signal.
   let frontness = clamp(dot(nw, u.upstream.xyz), -1.0, 1.0);
-  let cp = clamp(cpLBM + frontness * 0.85, -1.5, 1.5);
+  let cp = clamp(cpLBM + frontness * 0.25, -1.5, 1.5);
 
   // Tighter mapping range: most data falls in ±0.6, so use that as the
   // colour span (rather than ±1.5) for dramatic gradients.

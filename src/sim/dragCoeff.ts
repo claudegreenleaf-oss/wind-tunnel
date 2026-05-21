@@ -178,6 +178,9 @@ export class DragCoeffCalc {
 
   /** Frontal area in lattice units (cells²). Set by `setFrontalArea`. */
   private frontalArea = 1;
+  /** Planform area in lattice units (cells²). Set by `setPlanformArea`.
+   *  Used as the Cl reference area — chord × span for an airfoil. */
+  private planformArea = 1;
 
   /** Exponential-moving-average coefficients; smooths transient noise for the HUD. */
   private cdEMA = 0;
