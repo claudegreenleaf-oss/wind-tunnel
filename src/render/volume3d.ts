@@ -188,34 +188,45 @@ fn fs_main(in : FragIn) -> @location(0) vec4<f32> {
 
     let macros = textureSampleLevel(macrosTex, linearSamp, uvwWarped, 0.0);
     let speed  = length(macros.xyz);
-    let speedN = clamp(speed / 0.18, 0.0, 1.0);
+    let speedN = clamp(speed / 0.14, 0.0, 1.0);
 
-    // Density proxy: combine dye field + a velocity-magnitude-driven "smoke trail".
-    // Modulate by an fbm field so it looks granular instead of uniform.
+    // Long wisps stretched along the local flow direction. fbm sampled at a
+    // worldP that's been "pulled back" along the flow produces streaky filaments
+    // instead of isotropic blobs.
+    let flowDir = macros.xyz / max(speed, 1e-4);
+    let stretch = worldP - flowDir * 0.6;
+    let wisp = clamp(
+      fbm3(stretch * 4.0 + vec3(0.0, 0.0, timeT)) * 1.5
+      + fbm3(worldP * 14.0 + vec3(5.0, 9.0, timeT * 1.7)) * 0.55
+      - 0.3,
+      0.0, 1.8);
+
     let dye = textureSampleLevel(dyeTex, linearSamp, uvwWarped, 0.0);
     let dyeIntensity = clamp(length(dye.rgb), 0.0, 1.5);
-    let smokeMask = clamp(fbm3(worldP * 4.0 + vec3(0.0, 0.0, timeT)) * 1.4, 0.0, 1.2);
-    // Speed-driven smoke is the default volumetric (no dye required), so its
-    // contribution is the dominant term until the user injects.
-    let density = dyeIntensity * 1.2 + speedN * 3.5 * smokeMask;
 
-    // Henyey-Greenstein-ish forward scatter so smoke catches light from behind.
-    let cosA = dot(rd, normalize(macros.xyz + vec3(1e-4)));
-    let g = 0.45;
+    // Cubic ramp on speed so empty-air is genuinely transparent and bulk-flow
+    // is strong; without this every voxel has a baseline haze.
+    let speedDensity = speedN * speedN * (3.0 - 2.0 * speedN);
+    let density = dyeIntensity * 1.4 + speedDensity * 5.5 * wisp;
+
+    // Henyey-Greenstein forward scatter — strong forward gain
+    let cosA = dot(rd, flowDir);
+    let g = 0.6;
     let phase = (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * cosA, 1.5);
 
-    // Per-step alpha kept small so dense regions still let light through —
-    // gives that wispy translucent quality instead of an opaque wall.
-    let alpha = clamp(density * 0.22, 0.0, 0.65);
+    let alpha = clamp(density * 0.32, 0.0, 0.85);
 
-    // Color: dye dominates where present; speed-driven turbo elsewhere.
-    let speedColor = turbo(0.15 + speedN * 0.85);
-    let glow = mix(speedColor * (0.4 + 0.7 * speedN), dye.rgb * 1.6, clamp(dyeIntensity, 0.0, 1.0));
-    let scattered = glow * (0.7 + 0.6 * phase);
+    // Turbo gradient with cubic ramp shoves more pixels into the warm half,
+    // and self-emission lights up the fast regions.
+    let warm = clamp(pow(speedN, 0.65), 0.0, 1.0);
+    let speedColor = turbo(0.05 + warm * 0.92);
+    let emissive   = pow(speedN, 2.0) * 1.2;
+    let glow = mix(speedColor * (0.6 + emissive), dye.rgb * 2.0, clamp(dyeIntensity, 0.0, 1.0));
+    let scattered = glow * (0.9 + 0.8 * phase);
 
     accumColor += transmit * alpha * scattered;
     transmit   *= 1.0 - alpha;
-    if transmit < 0.08 { break; }
+    if transmit < 0.05 { break; }
   }
 
   let outA = (1.0 - transmit) * 0.95;

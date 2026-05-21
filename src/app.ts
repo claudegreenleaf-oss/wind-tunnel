@@ -198,6 +198,8 @@ export class App {
         () => { const t = ctx.getCurrentTexture(); return [t.width, t.height]; },
       );
       this.streamlines.setMacrosTexture(this.lbm.macrosTextureView);
+      const i0 = this.config.inlets[0]!;
+      this.streamlines.setInletConfig(i0.yFrac, i0.zFrac, i0.radius);
 
       // Slice viewer — uses the full-viewport canvas when slice tab is active,
       // or the PiP canvas when another tab shows it as an overlay.
@@ -312,6 +314,8 @@ export class App {
       // and advanced views stay consistent.
       this.config.inlets[0]!.radius = this.config.inletRadius;
       this.syncInletsToGpu();
+      const i0 = this.config.inlets[0]!;
+      this.streamlines?.setInletConfig(i0.yFrac, i0.zFrac, i0.radius);
     });
 
     // Build the per-inlet advanced UI inside #inlets-host. Always 4 rows.
@@ -707,8 +711,40 @@ export class App {
       pip.style.width = tabRect.width + 'px';
     };
 
+    // Wire view-specific floating controls (Streamlines: resolution + width)
+    const viewControls = document.getElementById('view-controls');
+    const vNSlider = document.getElementById('sl-vN') as HTMLInputElement | null;
+    const vNVal    = document.getElementById('val-vN');
+    const vWSlider = document.getElementById('sl-vWidth') as HTMLInputElement | null;
+    const vWVal    = document.getElementById('val-vWidth');
+    if (vNSlider && vNVal) {
+      vNSlider.value = String(this.config.N);
+      vNVal.textContent = String(this.config.N);
+      vNSlider.addEventListener('input', () => {
+        vNVal.textContent = vNSlider.value;
+        this.config.N = parseInt(vNSlider.value, 10);
+        // Sync the original Setup-tab slider too
+        if (nSlider) { nSlider.value = vNSlider.value; updateNLabel(); }
+      });
+      vNSlider.addEventListener('change', () => this.applyResolution());
+    }
+    if (vWSlider && vWVal) {
+      vWVal.textContent = vWSlider.value;
+      this.streamlines?.setRibbonWidth(parseFloat(vWSlider.value) / 1000);
+      vWSlider.addEventListener('input', () => {
+        vWVal.textContent = vWSlider.value;
+        this.streamlines?.setRibbonWidth(parseFloat(vWSlider.value) / 1000);
+      });
+    }
+
     const setMode = (mode: 'particles' | 'streamlines' | 'volume' | 'slice') => {
       this.viewMode = mode;
+
+      // Show/hide view-specific floating controls
+      if (viewControls) {
+        if (mode === 'streamlines') viewControls.removeAttribute('hidden');
+        else viewControls.setAttribute('hidden', '');
+      }
 
       // Toggle full-viewport slice canvas visibility
       if (sliceFullVp) {
@@ -1219,6 +1255,9 @@ export class App {
     );
     this.obstacleMesh.scale.setScalar(Math.max(0.01, this.config.scaleMul));
     this.scene.add(this.obstacleMesh);
+    // Enable layer 1 in addition to default 0 so the obstacle can be
+    // re-drawn on top of streamlines via a layer-1 camera pass.
+    this.obstacleMesh.traverse((o) => o.layers.enable(1));
 
     // Update the obstacle bound, then WIPE all particles (per user spec —
     // changing shape should clear the scene and let the new flow develop).
@@ -1572,9 +1611,7 @@ export class App {
         this.fluidSurface.renderRawSpheres(view, proj, sphereSize, t, aabbMin, aabbMax);
 
       } else if (this.viewMode === 'streamlines' && this.streamlines) {
-        // ── Streamlines ── RK4 ribbons. dt bumped 10× from 0.008 so ribbons
-        // visibly grow within a few frames of tab activation; previously the
-        // step was too small to perceive any motion.
+        // ── Streamlines ── RK4 ribbons.
         const slDt = this.config.paused ? 0 : 0.08 * this.config.simSpeed;
         this.streamlines.render(view, proj, aabbMin, aabbMax, { W, H, D }, slDt);
 
@@ -1583,7 +1620,7 @@ export class App {
         // Rebind the dye view each frame: DyeField3D ping-pongs its read/write
         // textures, so volumeRenderer would otherwise sample the stale half.
         this.volumeRenderer.setTextures(this.lbm.macrosTextureView, this.dye.currentView);
-        this.volumeRenderer.render(view, proj, camPos, aabbMin, aabbMax, 28);
+        this.volumeRenderer.render(view, proj, camPos, aabbMin, aabbMax, 40);
 
       } else if (this.viewMode === 'slice') {
         // ── Full-viewport slice ──

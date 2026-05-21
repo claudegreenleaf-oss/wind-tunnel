@@ -243,6 +243,20 @@ export class StreamlineRenderer {
   readonly TRACE_LEN = TRACE_LEN;
   readonly N_SEEDS   = N_SEEDS;
 
+  /** Inlet circle (single, centred-by-default). Fractions of the AABB. */
+  private inletConfig: { yFrac: number; zFrac: number; radius: number } = {
+    yFrac: 0.5, zFrac: 0.5, radius: 0.12,
+  };
+
+  setInletConfig(yFrac: number, zFrac: number, radius: number) {
+    this.inletConfig = { yFrac, zFrac, radius };
+    this.seeded = false;   // reseed next frame
+  }
+
+  /** Half-width of the ribbons in NDC units. ~0.0025 = ~4 px on a 1600-px viewport. */
+  private ribbonWidth = 0.0025;
+  setRibbonWidth(w: number) { this.ribbonWidth = Math.max(0.0001, w); }
+
   // GPU buffers
   private vertBuf!: GPUBuffer;   // TRACE_LEN * N_SEEDS * 4 f32s
   private seedBuf!: GPUBuffer;   // N_SEEDS * 4 f32s (current position)
@@ -289,29 +303,35 @@ export class StreamlineRenderer {
     this.rebuildBindGroups();
   }
 
-  /** Grid of seed points on a single 2D plane just inside the inlet face.
-   *  Each seed is the start of a full inlet→outlet streamline (AirShaper-style). */
+  /** Polar grid of seed points filling the active inlet circle at the inflow
+   *  face. Every streamline starts where flow actually enters the domain. */
   private initSeeds(aabbMin: THREE.Vector3, aabbMax: THREE.Vector3) {
     const data = new Float32Array(N_SEEDS * 4);
     const aabbSize = new THREE.Vector3().subVectors(aabbMax, aabbMin);
-    // 10×12 grid → 120 seeds (matches N_SEEDS). Place ~20% downstream of the
-    // inlet face: by then the inlet jet has spread and the full cross-section
-    // has positive flow, so all seeds get a non-zero starting velocity. Seeding
-    // ON the inlet face only catches the ~12 % radius jet and leaves most
-    // streamlines stalled.
-    const NY = 10, NZ = 12;
-    const xPlane = aabbMin.x + aabbSize.x * 0.20;
+    const inlet = this.inletConfig;
+    // Inlet plane: just inside the inflow face so the seeds aren't exactly on
+    // the boundary (where wall handling could zero them out).
+    const xPlane = aabbMin.x + aabbSize.x * 0.005;
+    const cy = aabbMin.y + aabbSize.y * inlet.yFrac;
+    const cz = aabbMin.z + aabbSize.z * inlet.zFrac;
+    // Inlet radius in world units: smaller of the two transverse half-spans
+    // so a 50 % "radius" still fits in a non-square AABB.
+    const inletR = inlet.radius * Math.min(aabbSize.y, aabbSize.z);
+    // Polar grid: rings × spokes ≈ N_SEEDS, spokes scale with ring radius
+    // (Fibonacci-ish lattice for even coverage).
     let i = 0;
-    for (let iy = 0; iy < NY; iy++) {
-      for (let iz = 0; iz < NZ; iz++) {
-        const yFrac = (iy + 0.5) / NY;
-        const zFrac = (iz + 0.5) / NZ;
-        data[i * 4 + 0] = xPlane;
-        data[i * 4 + 1] = aabbMin.y + aabbSize.y * (0.08 + 0.84 * yFrac);
-        data[i * 4 + 2] = aabbMin.z + aabbSize.z * (0.08 + 0.84 * zFrac);
-        data[i * 4 + 3] = 0;
-        i++;
-      }
+    const golden = Math.PI * (3 - Math.sqrt(5));
+    for (let k = 0; k < N_SEEDS; k++) {
+      // r ∈ [0, inletR] using sqrt for uniform area density
+      const r = inletR * Math.sqrt((k + 0.5) / N_SEEDS);
+      const theta = k * golden;
+      const dy = r * Math.cos(theta);
+      const dz = r * Math.sin(theta);
+      data[i * 4 + 0] = xPlane;
+      data[i * 4 + 1] = cy + dy;
+      data[i * 4 + 2] = cz + dz;
+      data[i * 4 + 3] = 0;
+      i++;
     }
     // Pre-fill the verts buffer with the seed position so the first frame's
     // render doesn't show stray (0,0,0) lines while cs_advect catches up.
@@ -488,7 +508,7 @@ export class StreamlineRenderer {
       ri[1] = N_SEEDS;
       ri[2] = this.head;
       rd[20] = ch / Math.max(cw, 1);         // aspect (h/w)
-      rd[21] = 0.0025;                       // half-width in NDC ≈ 4 px wide on a 1600 viewport
+      rd[21] = this.ribbonWidth;             // half-width in NDC
       this.device.queue.writeBuffer(this.renderUniBuf, 0, rd);
     }
 
