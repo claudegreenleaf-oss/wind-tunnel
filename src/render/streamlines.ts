@@ -135,6 +135,10 @@ struct Uniforms {
   traceLen  : u32,
   nSeeds    : u32,
   head      : u32,
+  aspect    : f32,    // viewport height / width
+  width     : f32,    // ribbon half-width in NDC
+  pad0      : f32,
+  pad1      : f32,
 }
 
 struct Vertex {
@@ -151,7 +155,6 @@ struct VertOut {
   @location(1) alpha      : f32,
 }
 
-// Turbo ramp matching volume3d.ts
 fn turbo(t : f32) -> vec3<f32> {
   let tt = clamp(t, 0.0, 1.0);
   if tt < 0.2 { return mix(vec3(0.19, 0.07, 0.23), vec3(0.10, 0.40, 0.95), tt * 5.0); }
@@ -161,33 +164,65 @@ fn turbo(t : f32) -> vec3<f32> {
   return mix(vec3(0.98, 0.85, 0.10), vec3(1.00, 0.25, 0.10), (tt - 0.8) * 5.0);
 }
 
-// line-list topology: each pair of vertices is one segment.
-// Total vertices = N_SEEDS * (TRACE_LEN - 1) * 2
-// Layout: seed0_seg0_v0, seed0_seg0_v1, seed0_seg1_v0, seed0_seg1_v1, ...
+// Triangle-list topology, 6 vertices per segment (2 triangles forming a quad).
+// Vertex count per seed = (TRACE_LEN - 1) * 6.  Each segment uses two ring-buffer
+// samples (k, k+1) and emits a screen-space ribbon offset perpendicular to the
+// projected tangent.  This is the standard "screen-space line" technique —
+// gives AirShaper-style thick colored streamlines instead of 1-pixel lines.
 @vertex
 fn vs_main(@builtin(vertex_index) vi : u32) -> VertOut {
   let traceLen  = u.traceLen;
   let segsPerSeed = traceLen - 1u;
 
-  let endpoint  = vi % 2u;                      // 0 = older end, 1 = newer end
-  let segGlobal = vi / 2u;                      // global segment index
+  let segGlobal = vi / 6u;
+  let inSeg     = vi % 6u;
   let seedIdx   = segGlobal / segsPerSeed;
-  let segInSeed = segGlobal % segsPerSeed;       // 0 = oldest segment
+  let segInSeed = segGlobal % segsPerSeed;
 
-  // No ring buffer — verts[seedIdx * traceLen + step] holds the streamline
-  // sample at step k of seedIdx's path (step 0 = inlet, last = downstream).
-  let step   = segInSeed + endpoint;           // 0..traceLen-1
-  let bufIdx = seedIdx * traceLen + step;
+  // Two-triangle quad per segment: (k,-)(k,+)(k+1,-) and (k,+)(k+1,-)(k+1,+).
+  // endpoint = 1 means use sample k+1; side = +1/-1 picks the offset side.
+  var endpoint : u32 = 0u;
+  var side     : f32 = -1.0;
+  if (inSeg == 1u) { endpoint = 0u; side =  1.0; }
+  else if (inSeg == 2u) { endpoint = 1u; side = -1.0; }
+  else if (inSeg == 3u) { endpoint = 0u; side =  1.0; }
+  else if (inSeg == 4u) { endpoint = 1u; side = -1.0; }
+  else if (inSeg == 5u) { endpoint = 1u; side =  1.0; }
 
-  let vtx = verts[bufIdx];
+  let bufIdxA = seedIdx * traceLen + segInSeed;
+  let bufIdxB = bufIdxA + 1u;
+  let vA = verts[bufIdxA];
+  let vB = verts[bufIdxB];
+  let usePos   = select(vA.pos,   vB.pos,   endpoint == 1u);
+  let useSpeed = select(vA.speed, vB.speed, endpoint == 1u);
+
+  // Project both endpoints to clip; compute tangent in aspect-corrected NDC
+  // (y * aspect so 1 NDC unit on x and y span the same number of pixels).
+  let clipA = u.viewProj * vec4f(vA.pos, 1.0);
+  let clipB = u.viewProj * vec4f(vB.pos, 1.0);
+  let ndcA  = clipA.xy / clipA.w;
+  let ndcB  = clipB.xy / clipB.w;
+  let pixA  = vec2f(ndcA.x, ndcA.y * u.aspect);
+  let pixB  = vec2f(ndcB.x, ndcB.y * u.aspect);
+  var t_pix = pixB - pixA;
+  let tlen  = max(length(t_pix), 1e-5);
+  t_pix     = t_pix / tlen;
+  // Unit-length perpendicular in pixel space.
+  let perp_pix = vec2f(-t_pix.y, t_pix.x);
+  // Convert offset back to NDC (un-correct y).
+  let offset_ndc = vec2f(perp_pix.x, perp_pix.y / u.aspect) * side * u.width;
+
+  let clipUse = u.viewProj * vec4f(usePos, 1.0);
+  let offset  = offset_ndc * clipUse.w;
 
   var out : VertOut;
-  out.clip  = u.viewProj * vec4(vtx.pos, 1.0);
-  let t     = clamp(vtx.speed / u.speedMax, 0.0, 1.0);
-  out.col   = turbo(t);
-  // Age-based fade: older segments more transparent
-  let age   = f32(step) / f32(traceLen - 1u);
-  out.alpha = pow(age, 1.6) * 0.9;
+  out.clip  = vec4f(clipUse.x + offset.x, clipUse.y + offset.y, clipUse.z, clipUse.w);
+  let speedN = clamp(useSpeed / u.speedMax, 0.0, 1.0);
+  out.col    = turbo(speedN);
+  // Slight tail fade so the start of each streamline is a little softer than
+  // the head, but no big age dropoff — full streamline is always visible.
+  let frac   = (f32(segInSeed) + f32(endpoint)) / f32(segsPerSeed);
+  out.alpha  = 0.45 + 0.55 * smoothstep(0.0, 0.25, frac);
   return out;
 }
 
@@ -315,7 +350,7 @@ export class StreamlineRenderer {
       label: 'streamline-compute-uni',
     });
     this.renderUniBuf = this.device.createBuffer({
-      size:  80,  // mat4(64) + 4×u32(16)
+      size:  96,  // mat4(64) + 4×u32(16) + aspect/width/2 pad(16)
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       label: 'streamline-render-uni',
     });
@@ -369,7 +404,7 @@ export class StreamlineRenderer {
           },
         }],
       },
-      primitive: { topology: 'line-list' },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
       depthStencil: {
         format: 'depth24plus',
         depthWriteEnabled: false,
@@ -442,16 +477,18 @@ export class StreamlineRenderer {
       this.device.queue.writeBuffer(this.computeUniBuf, 0, d);
     }
 
-    // ── Write render uniforms ──
+    // ── Write render uniforms (96 bytes) ──
     {
       const viewProj = new THREE.Matrix4().multiplyMatrices(projMatrix, viewMatrix);
-      const rd = new Float32Array(20);
-      rd.set(viewProj.elements, 0);          // viewProj: 16 f32s
-      rd[16] = 0.10;                         // speedMax — tuned for wScale*60 advection
+      const rd = new Float32Array(24);
+      rd.set(viewProj.elements, 0);          // viewProj: bytes 0-63
+      rd[16] = 0.45;                         // speedMax — push the gradient warmer (cyan→yellow→red across the bulk flow)
       const ri = new Uint32Array(rd.buffer, 68, 3);
       ri[0] = TRACE_LEN;
       ri[1] = N_SEEDS;
       ri[2] = this.head;
+      rd[20] = ch / Math.max(cw, 1);         // aspect (h/w)
+      rd[21] = 0.0025;                       // half-width in NDC ≈ 4 px wide on a 1600 viewport
       this.device.queue.writeBuffer(this.renderUniBuf, 0, rd);
     }
 
@@ -487,7 +524,7 @@ export class StreamlineRenderer {
       pass.setBindGroup(0, this.renderBG);
 
       // Single draw call: N_SEEDS × (TRACE_LEN-1) segments × 2 endpoints
-      const totalVerts = N_SEEDS * (TRACE_LEN - 1) * 2;
+      const totalVerts = N_SEEDS * (TRACE_LEN - 1) * 6;
       pass.draw(totalVerts);
       pass.end();
     }
