@@ -1583,7 +1583,7 @@ export class App {
         // Rebind the dye view each frame: DyeField3D ping-pongs its read/write
         // textures, so volumeRenderer would otherwise sample the stale half.
         this.volumeRenderer.setTextures(this.lbm.macrosTextureView, this.dye.currentView);
-        this.volumeRenderer.render(view, proj, camPos, aabbMin, aabbMax, 48);
+        this.volumeRenderer.render(view, proj, camPos, aabbMin, aabbMax, 28);
 
       } else if (this.viewMode === 'slice') {
         // ── Full-viewport slice ──

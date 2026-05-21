@@ -215,7 +215,7 @@ fn fs_main(in : FragIn) -> @location(0) vec4<f32> {
 
     accumColor += transmit * alpha * scattered;
     transmit   *= 1.0 - alpha;
-    if transmit < 0.02 { break; }
+    if transmit < 0.08 { break; }
   }
 
   let outA = (1.0 - transmit) * 0.95;

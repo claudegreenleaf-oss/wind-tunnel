@@ -20,8 +20,8 @@
 
 import * as THREE from 'three';
 
-const TRACE_LEN = 80;      // steps per ribbon
-const N_SEEDS   = 1800;    // dense enough to read like AirShaper, not a wall
+const TRACE_LEN = 220;     // full inlet→outlet ribbon
+const N_SEEDS   = 120;     // 10×12 grid on a single inlet plane (AirShaper-style)
 
 // ─── Compute shader ──────────────────────────────────────────────────────────
 
@@ -66,8 +66,12 @@ fn sampleVelocity(worldPos : vec3<f32>) -> vec3<f32> {
   // and AABB side 1.0, dt=0.08 gives ~0.0001 world units / frame — far too
   // slow for a 64-step ribbon. Scale up so a streamline traverses ~half the
   // domain over its trace length.
+  // Larger multiplier so each integration step covers ~1% of the domain in X.
+  // With 220 steps that gives ~2x AABB coverage — every streamline reaches
+  // the outlet boundary (and OOB-terminates there) even when flow slows in
+  // the wake region.
   let wScale = aabbSize.x / f32(u.dims.x);
-  return s.xyz * wScale * 60.0;
+  return s.xyz * wScale * 140.0;
 }
 
 // RK4 step: advance worldPos by dt through velocity field.
@@ -87,50 +91,37 @@ fn pcg(v : u32) -> u32 {
 }
 fn rng(seed : u32) -> f32 { return f32(pcg(seed)) / 4294967296.0; }
 
-@compute @workgroup_size(64)
+// Each thread = one seed on the inlet plane. Integrate the FULL streamline
+// from seed point downstream for TRACE_LEN RK4 steps; write all points into
+// verts[idx*TRACE_LEN .. idx*TRACE_LEN + TRACE_LEN-1]. Re-run every frame so
+// the streamlines update as the flow evolves.
+@compute @workgroup_size(32)
 fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
   let idx = gid.x;
   if idx >= N_SEEDS { return; }
 
-  let head  = u.dims.w;            // current ring-buffer write pointer (0..TRACE_LEN-1)
-  let dt    = u.dt;
+  let dt = u.dt;
+  let aabbSize = u.aabbMax.xyz - u.aabbMin.xyz;
 
   var pos = seeds[idx].xyz;
+  var lastSpeed : f32 = 0.0;
+  var terminated : bool = false;
 
-  // RK4 advance
-  let newPos = rk4(pos, dt);
-
-  // Compute speed at new position
-  let vel   = sampleVelocity(newPos);
-  let speed = length(vel);
-
-  // Write into ring buffer at slot [idx * TRACE_LEN + head]
-  let slot = idx * TRACE_LEN + head;
-  verts[slot] = Vertex(newPos, speed);
-
-  // Persist new position to seed table
-  seeds[idx] = vec4(newPos, 0.0);
-
-  // Reseed if out of bounds or stalled
-  let aabbSize = u.aabbMax.xyz - u.aabbMin.xyz;
-  let uv = (newPos - u.aabbMin.xyz) / aabbSize;
-  let oob = any(uv < vec3(0.0)) || any(uv > vec3(1.0));
-  let stalled = speed < 0.00001;
-  if oob || stalled {
-    // Reseed on the inlet face (minimum X of the AABB), random Y/Z within AABB.
-    let s0 = pcg(idx * 31337u + head * 13u);
-    let s1 = pcg(s0 + 7919u);
-    let s2 = pcg(s1 + 2053u);
-    let yr = f32(s0) / 4294967296.0;
-    let zr = f32(s1) / 4294967296.0;
-    let xr = f32(s2) / 4294967296.0 * 0.05;  // slight x jitter so not all on face
-    let newSeed = vec3(
-      u.aabbMin.x + aabbSize.x * xr,
-      u.aabbMin.y + aabbSize.y * yr,
-      u.aabbMin.z + aabbSize.z * zr,
-    );
-    seeds[idx] = vec4(newSeed, 0.0);
-    verts[slot] = Vertex(newSeed, 0.0);
+  for (var k : u32 = 0u; k < TRACE_LEN; k = k + 1u) {
+    let vel   = sampleVelocity(pos);
+    let speed = length(vel);
+    verts[idx * TRACE_LEN + k] = Vertex(pos, select(speed, lastSpeed, terminated));
+    if !terminated {
+      let nextPos = rk4(pos, dt);
+      let uv = (nextPos - u.aabbMin.xyz) / aabbSize;
+      let oob = any(uv < vec3(0.0)) || any(uv > vec3(1.0));
+      if oob || speed < 0.000001 {
+        terminated = true;
+      } else {
+        pos = nextPos;
+        lastSpeed = speed;
+      }
+    }
   }
 }
 `;
@@ -183,13 +174,10 @@ fn vs_main(@builtin(vertex_index) vi : u32) -> VertOut {
   let seedIdx   = segGlobal / segsPerSeed;
   let segInSeed = segGlobal % segsPerSeed;       // 0 = oldest segment
 
-  // In ring buffer, head is the NEWEST entry (just written).
-  // Oldest entry is at (head + 1) % traceLen.
-  // step 0 = oldest = ring slot (head+1)%traceLen
-  // step k = ring slot (head+1+k)%traceLen
-  let step     = segInSeed + endpoint;           // 0..traceLen-1
-  let ringSlot = (u.head + 1u + step) % traceLen;
-  let bufIdx   = seedIdx * traceLen + ringSlot;
+  // No ring buffer — verts[seedIdx * traceLen + step] holds the streamline
+  // sample at step k of seedIdx's path (step 0 = inlet, last = downstream).
+  let step   = segInSeed + endpoint;           // 0..traceLen-1
+  let bufIdx = seedIdx * traceLen + step;
 
   let vtx = verts[bufIdx];
 
@@ -266,28 +254,32 @@ export class StreamlineRenderer {
     this.rebuildBindGroups();
   }
 
-  /** Scatter N_SEEDS seed points randomly within the AABB inlet region. */
+  /** Grid of seed points on a single 2D plane just inside the inlet face.
+   *  Each seed is the start of a full inlet→outlet streamline (AirShaper-style). */
   private initSeeds(aabbMin: THREE.Vector3, aabbMax: THREE.Vector3) {
     const data = new Float32Array(N_SEEDS * 4);
     const aabbSize = new THREE.Vector3().subVectors(aabbMax, aabbMin);
-    const rng = (i: number, salt: number) => {
-      let x = (i * 2654435761 + salt * 40503) >>> 0;
-      x = ((x >> 16) ^ x) >>> 0;
-      return (x & 0xffff) / 65536;
-    };
-    for (let i = 0; i < N_SEEDS; i++) {
-      // Distribute seeds across the FULL volume (not just the inlet face).
-      // Otherwise the ribbon-fill warm-up takes several seconds because seeds
-      // have to advect downstream before they're visible. Volume-wide seeding
-      // means ribbons appear everywhere on tab activation.
-      data[i * 4 + 0] = aabbMin.x + aabbSize.x * rng(i, 1);
-      data[i * 4 + 1] = aabbMin.y + aabbSize.y * rng(i, 2);
-      data[i * 4 + 2] = aabbMin.z + aabbSize.z * rng(i, 3);
-      data[i * 4 + 3] = 0;
+    // 10×12 grid → 120 seeds (matches N_SEEDS). Place ~20% downstream of the
+    // inlet face: by then the inlet jet has spread and the full cross-section
+    // has positive flow, so all seeds get a non-zero starting velocity. Seeding
+    // ON the inlet face only catches the ~12 % radius jet and leaves most
+    // streamlines stalled.
+    const NY = 10, NZ = 12;
+    const xPlane = aabbMin.x + aabbSize.x * 0.20;
+    let i = 0;
+    for (let iy = 0; iy < NY; iy++) {
+      for (let iz = 0; iz < NZ; iz++) {
+        const yFrac = (iy + 0.5) / NY;
+        const zFrac = (iz + 0.5) / NZ;
+        data[i * 4 + 0] = xPlane;
+        data[i * 4 + 1] = aabbMin.y + aabbSize.y * (0.08 + 0.84 * yFrac);
+        data[i * 4 + 2] = aabbMin.z + aabbSize.z * (0.08 + 0.84 * zFrac);
+        data[i * 4 + 3] = 0;
+        i++;
+      }
     }
-    // Seed the ring buffer with the initial position so segment 0 isn't (0,0,0)
-    // — without this every ribbon's "tail" is a long invisible streak to the
-    // world origin for the first TRACE_LEN frames.
+    // Pre-fill the verts buffer with the seed position so the first frame's
+    // render doesn't show stray (0,0,0) lines while cs_advect catches up.
     const ring = new Float32Array(TRACE_LEN * N_SEEDS * 4);
     for (let s = 0; s < N_SEEDS; s++) {
       for (let t = 0; t < TRACE_LEN; t++) {
@@ -470,7 +462,7 @@ export class StreamlineRenderer {
       const pass = enc.beginComputePass({ label: 'streamline-compute' });
       pass.setPipeline(this.computePipeline);
       pass.setBindGroup(0, this.computeBG);
-      pass.dispatchWorkgroups(Math.ceil(N_SEEDS / 64));
+      pass.dispatchWorkgroups(Math.ceil(N_SEEDS / 32));
       pass.end();
     }
 
@@ -501,11 +493,8 @@ export class StreamlineRenderer {
     }
 
     this.device.queue.submit([enc.finish()]);
-
-    // Advance ring-buffer head only when sim is running
-    if (dt > 0) {
-      this.head = (this.head + 1) % TRACE_LEN;
-    }
+    // No ring buffer — every frame recomputes the full streamline from each
+    // seed, so there is no head pointer to advance.
   }
 
   resetSeeds(aabbMin: THREE.Vector3, aabbMax: THREE.Vector3) {
