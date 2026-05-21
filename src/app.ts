@@ -816,8 +816,8 @@ export class App {
 
     // Inlet indicator: a faint plane on the -X face.
     const inletGeom = new THREE.PlaneGeometry(sz, sy);
-    const inletMat = new MeshBasicNodeMaterial({ transparent: true, opacity: 0.06, side: THREE.DoubleSide });
-    inletMat.color = new THREE.Color(0xff7ad9);
+    const inletMat = new MeshBasicNodeMaterial({ transparent: true, opacity: 0.05, side: THREE.DoubleSide });
+    inletMat.color = new THREE.Color(0x6bf0d6);
     const inlet = new THREE.Mesh(inletGeom, inletMat);
     inlet.position.set(-sx * 0.5, 0, 0);
     inlet.rotation.y = Math.PI * 0.5;

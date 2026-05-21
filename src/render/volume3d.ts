@@ -197,7 +197,7 @@ fn fs_main(in : FragIn) -> @location(0) vec4<f32> {
     let smokeMask = clamp(fbm3(worldP * 4.0 + vec3(0.0, 0.0, timeT)) * 1.4, 0.0, 1.2);
     // Speed-driven smoke is the default volumetric (no dye required), so its
     // contribution is the dominant term until the user injects.
-    let density = dyeIntensity * 0.95 + speedN * 1.3 * smokeMask;
+    let density = dyeIntensity * 1.2 + speedN * 3.5 * smokeMask;
 
     // Henyey-Greenstein-ish forward scatter so smoke catches light from behind.
     let cosA = dot(rd, normalize(macros.xyz + vec3(1e-4)));
@@ -206,7 +206,7 @@ fn fs_main(in : FragIn) -> @location(0) vec4<f32> {
 
     // Per-step alpha kept small so dense regions still let light through —
     // gives that wispy translucent quality instead of an opaque wall.
-    let alpha = clamp(density * 0.11, 0.0, 0.40);
+    let alpha = clamp(density * 0.22, 0.0, 0.65);
 
     // Color: dye dominates where present; speed-driven turbo elsewhere.
     let speedColor = turbo(0.15 + speedN * 0.85);
@@ -218,8 +218,7 @@ fn fs_main(in : FragIn) -> @location(0) vec4<f32> {
     if transmit < 0.02 { break; }
   }
 
-  // Reduced overall opacity so volume sits BEHIND particles as ambient smoke.
-  let outA = (1.0 - transmit) * 0.65;
+  let outA = (1.0 - transmit) * 0.95;
   return vec4(accumColor, outA);
 }
 `;

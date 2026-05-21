@@ -20,8 +20,8 @@
 
 import * as THREE from 'three';
 
-const TRACE_LEN = 64;      // steps per ribbon (longer = clearer streamlines)
-const N_SEEDS   = 800;     // fewer seeds → distinct ribbons instead of a noise wall
+const TRACE_LEN = 80;      // steps per ribbon
+const N_SEEDS   = 1800;    // dense enough to read like AirShaper, not a wall
 
 // ─── Compute shader ──────────────────────────────────────────────────────────
 
@@ -455,7 +455,7 @@ export class StreamlineRenderer {
       const viewProj = new THREE.Matrix4().multiplyMatrices(projMatrix, viewMatrix);
       const rd = new Float32Array(20);
       rd.set(viewProj.elements, 0);          // viewProj: 16 f32s
-      rd[16] = 0.25;                         // speedMax
+      rd[16] = 0.10;                         // speedMax — tuned for wScale*60 advection
       const ri = new Uint32Array(rd.buffer, 68, 3);
       ri[0] = TRACE_LEN;
       ri[1] = N_SEEDS;
