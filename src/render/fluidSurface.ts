@@ -1446,9 +1446,9 @@ fn fs_obstacle(in : VOut) -> @location(0) vec4f {
   let uIn = u.scalars.x;
   let denom = max(0.5 * uIn * uIn, 1e-5);
 
-  // Sample the freestream density at four AABB corners and average to get a
-  // reliable baseline ρ. LBM bulk has a small intrinsic offset from 1.0; we
-  // subtract it so Cp = 0 reads as "freestream" rather than "uniformly low".
+  // Freestream baseline ρ — averaged from the four AABB-edge corners where
+  // flow is least disturbed. LBM has a small bulk-density offset that would
+  // otherwise tint the whole obstacle a constant colour.
   let baseRho = 0.25 * (
       textureSampleLevel(macrosTex, samp, vec3f(0.5, 0.95, 0.05), 0.0).w
     + textureSampleLevel(macrosTex, samp, vec3f(0.5, 0.05, 0.95), 0.0).w
@@ -1456,41 +1456,38 @@ fn fs_obstacle(in : VOut) -> @location(0) vec4f {
     + textureSampleLevel(macrosTex, samp, vec3f(0.5, 0.05, 0.05), 0.0).w
   );
 
-  // Walk outward from the surface point along the normal; pick the first
-  // probe whose deviation from baseline exceeds a small threshold (that's
-  // the boundary-layer cell carrying the surface Cp). Falls back to the
-  // last sample if the gradient never rises.
+  // Single linear-interpolated probe just outside the surface. The sampler
+  // smooths across neighbouring LBM cells, so the result is a continuous Cp
+  // field on the obstacle rather than blocky cell-coloured patches.
   let cellWorld = aabbSize.x / 80.0;
-  var rhoSurf = baseRho;
-  for (var k = 2; k <= 6; k = k + 1) {
-    let probe = in.worldPos + nw * cellWorld * f32(k) * 0.7;
-    let uvw = clamp((probe - u.aabbMin.xyz) / aabbSize, vec3f(0.005), vec3f(0.995));
-    let r = textureSampleLevel(macrosTex, samp, uvw, 0.0).w;
-    if (abs(r - baseRho) > abs(rhoSurf - baseRho)) {
-      rhoSurf = r;
-    }
-  }
+  let probe = in.worldPos + nw * cellWorld * 1.8;
+  let uvw = clamp((probe - u.aabbMin.xyz) / aabbSize, vec3f(0.005), vec3f(0.995));
+  let rhoSurf = textureSampleLevel(macrosTex, samp, uvw, 0.0).w;
+
   let pLattice = (rhoSurf - baseRho) * (1.0 / 3.0);
-  let cpLBM = pLattice / denom;
+  // Amplify hard — LBM ρ deviations on the obstacle surface are typically
+  // tiny (~0.001-0.005), so without a big gain the whole surface clusters
+  // around mid-green. 4x amplification spreads the visible signal across
+  // the full ramp.
+  let cpLBM = pLattice / denom * 4.0;
 
-  // Direction-based proxy (windward → +1, leeward → -1). Used as a blend
-  // anchor when the LBM hasn't developed enough pressure variation to
-  // dominate, and to give the visualisation a meaningful baseline.
+  // Direction-based proxy gives the visualisation a meaningful baseline
+  // before the LBM has built up real pressure variation. Weighted lightly
+  // so it doesn't override true CFD data.
   let frontness = clamp(dot(nw, u.upstream.xyz), -1.0, 1.0);
+  let cp = clamp(cpLBM + frontness * 0.6, -1.5, 1.5);
 
-  // Blend confidence: |Cp_LBM| > ~0.4 is strong enough to trust the LBM.
-  let conf = clamp(abs(cpLBM) * 2.0, 0.0, 1.0);
-  let cp = mix(frontness, cpLBM, conf);
-
-  // Map cp ∈ [-1, +1] → turbo (blue→cyan→green→yellow→red).
-  let cpN = clamp((cp + 1.0) * 0.5, 0.0, 1.0);
+  // Tighter mapping range: most data falls in ±0.6, so use that as the
+  // colour span (rather than ±1.5) for dramatic gradients.
+  let cpN = clamp((cp + 0.7) / 1.4, 0.0, 1.0);
   var col = turbo5(cpN);
 
-  // Lambert + ambient — keeps the shape readable without darkening the colour
-  // ramp. The pressure ramp drives most of the visual signal.
+  // Stronger ambient + softer Lambert so the colour ramp dominates the visual
+  // (matching AirShaper's flat-shaded pressure plots where pressure is the
+  // only signal carried by the surface colour).
   let lightDir = normalize(vec3f(-0.3, 0.85, 0.4));
   let ndotl = clamp(dot(nw, lightDir), 0.0, 1.0);
-  col = col * (0.78 + 0.30 * ndotl);
+  col = col * (0.88 + 0.20 * ndotl);
   return vec4f(col, 1.0);
 }
 `;
