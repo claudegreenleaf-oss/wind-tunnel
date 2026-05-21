@@ -10,6 +10,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 const cache = new Map<string, Promise<THREE.BufferGeometry>>();
@@ -44,6 +45,23 @@ async function fetchAndMerge(url: string): Promise<THREE.BufferGeometry> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
   const buf = await res.arrayBuffer();
+
+  // STL branch: a single geometry with positions only — no scene graph.
+  if (/\.stl$/i.test(new URL(url, location.href).pathname)) {
+    const stl = new STLLoader();
+    const geom = stl.parse(buf);
+    geom.computeBoundingBox();
+    const bbox = geom.boundingBox!;
+    const size = new THREE.Vector3().subVectors(bbox.max, bbox.min);
+    const center = new THREE.Vector3().addVectors(bbox.min, bbox.max).multiplyScalar(0.5);
+    const longest = Math.max(size.x, size.y, size.z);
+    if (longest > 0) {
+      geom.applyMatrix4(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z));
+      geom.applyMatrix4(new THREE.Matrix4().makeScale(1 / longest, 1 / longest, 1 / longest));
+    }
+    geom.computeVertexNormals();
+    return geom;
+  }
 
   const gltf = await new Promise<any>((resolve, reject) => {
     sharedLoader.parse(buf, '', resolve, reject);

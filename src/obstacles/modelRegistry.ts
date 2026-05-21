@@ -67,6 +67,9 @@ export const REMOTE_MODELS: RemoteModelExt[] = [
   { id: 'horse',          name: 'Horse',          category: 'animals',   url: 'https://threejs.org/examples/models/gltf/Horse.glb',                                                                sizeKB: 178, elongated: true },
   { id: 'brain-stem',     name: 'Brain Stem',     category: 'animals',   url: 'https://cdn.jsdelivr.net/gh/KhronosGroup/glTF-Sample-Assets@main/Models/BrainStem/glTF-Binary/BrainStem.glb',        sizeKB: 1900, elongated: true },
 
+  // ── Custom (user-supplied) ──
+  { id: 'clipped',        name: 'Clipped (custom STL)', category: 'misc',  url: '/models/clipped.stl', sizeKB: 4000, elongated: true },
+
   // ── Objects ──
   { id: 'avocado',        name: 'Avocado',        category: 'objects',   url: 'https://cdn.jsdelivr.net/gh/KhronosGroup/glTF-Sample-Assets@main/Models/Avocado/glTF-Binary/Avocado.glb',           sizeKB: 1900 },
   { id: 'boom-box',       name: 'Boom Box',       category: 'objects',   url: 'https://cdn.jsdelivr.net/gh/KhronosGroup/glTF-Sample-Assets@main/Models/BoomBox/glTF-Binary/BoomBox.glb',            sizeKB: 1900 },
