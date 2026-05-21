@@ -1444,40 +1444,53 @@ fn fs_obstacle(in : VOut) -> @location(0) vec4f {
   let nw = normalize(in.normalWorld);
   let aabbSize = u.aabbMax.xyz - u.aabbMin.xyz;
   let uIn = u.scalars.x;
-
-  // Sample density at several points outside the surface along the normal,
-  // pick the most extreme deviation from ρ=1. This finds the boundary-layer
-  // peak (stagnation hotspot or suction trough) more reliably than a single
-  // probe and avoids accidentally sampling a solid LBM cell.
-  let cellWorld = aabbSize.x / 80.0;
-  var dRhoMax = 0.0;
-  for (var k = 1; k <= 4; k = k + 1) {
-    let probe = in.worldPos + nw * cellWorld * f32(k);
-    let uvw = clamp((probe - u.aabbMin.xyz) / aabbSize, vec3f(0.001), vec3f(0.999));
-    let m = textureSampleLevel(macrosTex, samp, uvw, 0.0);
-    let dRho = m.w - 1.0;
-    if (abs(dRho) > abs(dRhoMax)) { dRhoMax = dRho; }
-  }
-  let pLattice = dRhoMax * (1.0 / 3.0);
   let denom = max(0.5 * uIn * uIn, 1e-5);
+
+  // Sample the freestream density at four AABB corners and average to get a
+  // reliable baseline ρ. LBM bulk has a small intrinsic offset from 1.0; we
+  // subtract it so Cp = 0 reads as "freestream" rather than "uniformly low".
+  let baseRho = 0.25 * (
+      textureSampleLevel(macrosTex, samp, vec3f(0.5, 0.95, 0.05), 0.0).w
+    + textureSampleLevel(macrosTex, samp, vec3f(0.5, 0.05, 0.95), 0.0).w
+    + textureSampleLevel(macrosTex, samp, vec3f(0.5, 0.95, 0.95), 0.0).w
+    + textureSampleLevel(macrosTex, samp, vec3f(0.5, 0.05, 0.05), 0.0).w
+  );
+
+  // Walk outward from the surface point along the normal; pick the first
+  // probe whose deviation from baseline exceeds a small threshold (that's
+  // the boundary-layer cell carrying the surface Cp). Falls back to the
+  // last sample if the gradient never rises.
+  let cellWorld = aabbSize.x / 80.0;
+  var rhoSurf = baseRho;
+  for (var k = 2; k <= 6; k = k + 1) {
+    let probe = in.worldPos + nw * cellWorld * f32(k) * 0.7;
+    let uvw = clamp((probe - u.aabbMin.xyz) / aabbSize, vec3f(0.005), vec3f(0.995));
+    let r = textureSampleLevel(macrosTex, samp, uvw, 0.0).w;
+    if (abs(r - baseRho) > abs(rhoSurf - baseRho)) {
+      rhoSurf = r;
+    }
+  }
+  let pLattice = (rhoSurf - baseRho) * (1.0 / 3.0);
   let cpLBM = pLattice / denom;
 
-  // Fallback: direction-based Cp proxy. The flow hasn't fully developed near
-  // boot, and an obstacle in stagnant fluid would otherwise read as uniform.
+  // Direction-based proxy (windward → +1, leeward → -1). Used as a blend
+  // anchor when the LBM hasn't developed enough pressure variation to
+  // dominate, and to give the visualisation a meaningful baseline.
   let frontness = clamp(dot(nw, u.upstream.xyz), -1.0, 1.0);
 
-  // Blend: when |Cp_LBM| is small (≈ undeveloped flow) lean on the direction
-  // proxy; when LBM data is strong, lean on the real measurement.
+  // Blend confidence: |Cp_LBM| > ~0.4 is strong enough to trust the LBM.
   let conf = clamp(abs(cpLBM) * 2.0, 0.0, 1.0);
   let cp = mix(frontness, cpLBM, conf);
 
+  // Map cp ∈ [-1, +1] → turbo (blue→cyan→green→yellow→red).
   let cpN = clamp((cp + 1.0) * 0.5, 0.0, 1.0);
   var col = turbo5(cpN);
 
-  // Subtle Lambert shading for shape readability.
-  let lightDir = normalize(vec3f(-0.4, 0.85, 0.7));
+  // Lambert + ambient — keeps the shape readable without darkening the colour
+  // ramp. The pressure ramp drives most of the visual signal.
+  let lightDir = normalize(vec3f(-0.3, 0.85, 0.4));
   let ndotl = clamp(dot(nw, lightDir), 0.0, 1.0);
-  col = col * (0.85 + 0.25 * ndotl);
+  col = col * (0.78 + 0.30 * ndotl);
   return vec4f(col, 1.0);
 }
 `;

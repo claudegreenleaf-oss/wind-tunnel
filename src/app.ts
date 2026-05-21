@@ -1624,16 +1624,14 @@ export class App {
         const slDt = this.config.paused ? 0 : 0.08 * this.config.simSpeed;
         this.streamlines.render(view, proj, aabbMin, aabbMax, { W, H, D }, slDt);
 
-      } else if (this.viewMode === 'drag' && this.fluidSurface && this.volumeRenderer && this.dye) {
-        // ── Drag visualization ──
-        // 1) Volumetric Cp field: red bubbles in front of the obstacle
-        //    (stagnation, drag contributors) and blue bubbles around the
-        //    shoulders / wake (suction). Sampled from the live LBM density
-        //    via Cp = (ρ-1)·cs²/(½·U_in²); freestream noise (Cp ≈ 0) reads
-        //    transparent so the heatmap shows only where pressure deviates.
-        // 2) Obstacle Cp surface drawn on top with full opacity.
-        this.volumeRenderer.setTextures(this.lbm.macrosTextureView, this.dye.currentView);
-        this.volumeRenderer.render(view, proj, camPos, aabbMin, aabbMax, 40, this.config.uIn);
+      } else if (this.viewMode === 'drag' && this.fluidSurface) {
+        // ── Drag visualization (AirShaper-style) ──
+        // The obstacle surface itself is painted with Cp sampled from the
+        // live LBM density field. No volumetric overlay — AirShaper-class
+        // CFD drag plots show ONLY the surface heatmap with the obstacle
+        // floating on a clean background, so drag contributions read at a
+        // glance: red on stagnation (high Cp, large drag contribution),
+        // blue on suction (low Cp, opposite contribution).
         if (this.obstacleMesh) {
           this.obstacleMesh.updateMatrixWorld();
           this.fluidSurface.setObstacleTransform(view, proj, this.obstacleMesh.matrixWorld);
