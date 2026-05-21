@@ -233,10 +233,11 @@ fn fs_slice(@builtin(position) fragPos : vec4f) -> @location(0) vec4f {
   let uvw = sliceUvw(s, t);
   let v = sampleField(uvw, u.axisField.y);
 
-  // Normalize per field — these scales match the visible ranges of our LBM.
+  // Normalize per field. Pressure range bumped to 0.15 — density drift of
+  // up to ~13% (ρ ~ 0.87) was clamping the field to solid red at the old 0.04 scale.
   var n = 0.0;
   if u.axisField.y == 0u {       n = v / 0.10; }
-  else if u.axisField.y == 1u {  n = v / 0.04; }
+  else if u.axisField.y == 1u {  n = v / 0.15; }
   else {                         n = v * 30.0; }
   let col = turbo(n);
 

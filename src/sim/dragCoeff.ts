@@ -119,37 +119,43 @@ fn cs_drag(@builtin(global_invocation_id) gid : vec3<u32>) {
   let dux_dy = (u_py.x - u_my.x) * 0.5;
   let dux_dz = (u_pz.x - u_mz.x) * 0.5;
   let duy_dx = (u_px.y - u_mx.y) * 0.5;
+  let duy_dy = (u_py.y - u_my.y) * 0.5;
+  let duy_dz = (u_pz.y - u_mz.y) * 0.5;
   let duz_dx = (u_px.z - u_mx.z) * 0.5;
+  let duz_dy = (u_py.z - u_my.z) * 0.5;
 
-  // Strain-rate components touching F_x.
+  // Strain-rate components.
   let Sxx = dux_dx;
+  let Syy = duy_dy;
   let Sxy = 0.5 * (dux_dy + duy_dx);
   let Sxz = 0.5 * (dux_dz + duz_dx);
+  let Syz = 0.5 * (duy_dz + duz_dy);
 
   let mu = u.scalars.x;
   let two_mu_Sxx = 2.0 * mu * Sxx;
+  let two_mu_Syy = 2.0 * mu * Syy;
   let two_mu_Sxy = 2.0 * mu * Sxy;
   let two_mu_Sxz = 2.0 * mu * Sxz;
+  let two_mu_Syz = 2.0 * mu * Syz;
 
-  // F_x contribution per face. Convention: F_x = +p·d_x − 2μ·(S_xβ·d_β).
-  // Verified: a stagnation-point face (d=+X, p>0, S≈0) gives F_x ≈ +p > 0,
-  // i.e. the front of the obstacle drags downstream — same sign as flow.
+  // F_α contributions per face: F_α = +p·d_α − 2μ·(S_αβ·d_β).
   var fx : f32 = 0.0;
-  if (solidPx) { fx = fx +  p - two_mu_Sxx; }
-  if (solidMx) { fx = fx + -p + two_mu_Sxx; }
-  if (solidPy) { fx = fx + -two_mu_Sxy; }
-  if (solidMy) { fx = fx +  two_mu_Sxy; }
-  if (solidPz) { fx = fx + -two_mu_Sxz; }
-  if (solidMz) { fx = fx +  two_mu_Sxz; }
+  var fy : f32 = 0.0;
+  if (solidPx) { fx = fx + p - two_mu_Sxx; fy = fy - two_mu_Sxy; }
+  if (solidMx) { fx = fx - p + two_mu_Sxx; fy = fy + two_mu_Sxy; }
+  if (solidPy) { fx = fx - two_mu_Sxy;     fy = fy + p - two_mu_Syy; }
+  if (solidMy) { fx = fx + two_mu_Sxy;     fy = fy - p + two_mu_Syy; }
+  if (solidPz) { fx = fx - two_mu_Sxz;     fy = fy - two_mu_Syz; }
+  if (solidMz) { fx = fx + two_mu_Sxz;     fy = fy + two_mu_Syz; }
 
-  if (fx != 0.0) {
-    atomicAdd(&outI32[0], i32(fx * ${FIXED_SCALE.toExponential()}));
-  }
+  if (fx != 0.0) { atomicAdd(&outI32[0], i32(fx * ${FIXED_SCALE.toExponential()})); }
+  if (fy != 0.0) { atomicAdd(&outI32[1], i32(fy * ${FIXED_SCALE.toExponential()})); }
 }
 
 @compute @workgroup_size(1)
 fn cs_clear() {
   atomicStore(&outI32[0], 0);
+  atomicStore(&outI32[1], 0);
 }
 `;
 
@@ -168,12 +174,14 @@ export class DragCoeffCalc {
   private visc = 0.02;
   private readPending = false;
   private lastFx = 0;
+  private lastFy = 0;
 
   /** Frontal area in lattice units (cells²). Set by `setFrontalArea`. */
   private frontalArea = 1;
 
-  /** Exponential-moving-average Cd; smooths transient noise for the HUD. */
+  /** Exponential-moving-average coefficients; smooths transient noise for the HUD. */
   private cdEMA = 0;
+  private clEMA = 0;
   private emaAlpha = 0.15;
   /** Samples since the last shape/scale/orientation change. Used to skip the
    *  big transient spike that always follows a re-voxelization. */
@@ -186,11 +194,11 @@ export class DragCoeffCalc {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.outBuf = device.createBuffer({
-      size: 4,
+      size: 8,  // two i32 atomics: Fx, Fy
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
     this.readBuf = device.createBuffer({
-      size: 4,
+      size: 8,
       usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
     });
 
@@ -228,6 +236,7 @@ export class DragCoeffCalc {
     });
     // Reset the EMA so we don't drag the old shape's value into the new one.
     this.cdEMA = 0;
+    this.clEMA = 0;
     this.samplesSinceReset = 0;
   }
 
@@ -240,6 +249,7 @@ export class DragCoeffCalc {
     // Cd while the new mask is already in the GPU buffer.
     if (Math.abs(clamped - this.frontalArea) / this.frontalArea > 0.15) {
       this.cdEMA = 0;
+      this.clEMA = 0;
       this.samplesSinceReset = 0;
     }
     this.frontalArea = clamped;
@@ -280,7 +290,7 @@ export class DragCoeffCalc {
       );
       cp.end();
     }
-    enc.copyBufferToBuffer(this.outBuf, 0, this.readBuf, 0, 4);
+    enc.copyBufferToBuffer(this.outBuf, 0, this.readBuf, 0, 8);
     this.device.queue.submit([enc.finish()]);
 
     this.readPending = true;
@@ -288,14 +298,18 @@ export class DragCoeffCalc {
       const arr = new Int32Array(this.readBuf.getMappedRange().slice(0));
       this.readBuf.unmap();
       this.lastFx = arr[0] / FIXED_SCALE;
-      // EMA on Cd. Skip the first 3 samples after a reset — those carry the
-      // big spike from re-voxelization transients.
+      this.lastFy = arr[1] / FIXED_SCALE;
       const cdInst = this.computeInstCd();
+      const clInst = this.computeInstCl();
       this.samplesSinceReset++;
+      // Skip the first 3 samples after a reset — those carry the
+      // big spike from re-voxelization transients.
       if (this.samplesSinceReset <= 3) {
         this.cdEMA = cdInst;
+        this.clEMA = clInst;
       } else {
         this.cdEMA = (1 - this.emaAlpha) * this.cdEMA + this.emaAlpha * cdInst;
+        this.clEMA = (1 - this.emaAlpha) * this.clEMA + this.emaAlpha * clInst;
       }
       this.readPending = false;
     }).catch(() => { this.readPending = false; });
@@ -307,8 +321,16 @@ export class DragCoeffCalc {
     return this.lastFx / denom;
   }
 
+  private computeInstCl(): number {
+    const denom = 0.5 * 1.0 * this.uIn * this.uIn * this.frontalArea;
+    if (denom < 1e-9) return 0;
+    return this.lastFy / denom;
+  }
+
   /** Smoothed (EMA) drag coefficient — what the HUD should display. */
   getLastCd(): number { return this.cdEMA; }
+  /** Smoothed (EMA) lift coefficient. */
+  getLastCl(): number { return this.clEMA; }
 
   /** Most recent finished drag force estimate (lattice units). */
   getLastFx(): number { return this.lastFx; }

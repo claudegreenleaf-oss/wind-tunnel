@@ -315,7 +315,8 @@ export class StreamlineRenderer {
       label: 'streamline-seeds',
     });
     this.computeUniBuf = this.device.createBuffer({
-      size:  48,  // 3 × vec4 (aabbMin, aabbMax, dims) + vec4 (dt+pad)
+      // 3×vec4 (48) + f32 dt with 16-byte WGSL alignment padding = 64
+      size:  64,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       label: 'streamline-compute-uni',
     });
@@ -436,18 +437,14 @@ export class StreamlineRenderer {
     const [cw, ch] = this.getCanvasSize();
     this.ensureDepth(cw, ch);
 
-    // ── Write compute uniforms ──
+    // ── Write compute uniforms (64 bytes: 3×vec4 + f32 padded to vec4) ──
     {
-      const d = new Float32Array(12);
-      // aabbMin (vec4)
+      const d = new Float32Array(16);
       d[0] = aabbMin.x; d[1] = aabbMin.y; d[2] = aabbMin.z; d[3] = 0;
-      // aabbMax (vec4)
       d[4] = aabbMax.x; d[5] = aabbMax.y; d[6] = aabbMax.z; d[7] = 0;
-      // dims: W, H, D, head
       const ui = new Uint32Array(d.buffer, 32, 4);
       ui[0] = dims.W; ui[1] = dims.H; ui[2] = dims.D; ui[3] = this.head;
-      // dt + padding
-      d[8] = dt; d[9] = 0; d[10] = 0; d[11] = 0;
+      d[12] = dt; d[13] = 0; d[14] = 0; d[15] = 0;
       this.device.queue.writeBuffer(this.computeUniBuf, 0, d);
     }
 

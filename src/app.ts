@@ -1391,17 +1391,23 @@ export class App {
   private wireDragDrop() {
     const overlay = document.getElementById('drop-overlay')!;
 
-    this.canvas.addEventListener('dragover', (e) => {
+    // Listen at window level so the overlay shows as soon as the user starts
+    // dragging anywhere on the page, not only over the canvas.
+    let dragDepth = 0;
+    window.addEventListener('dragenter', (e) => {
       e.preventDefault();
-      overlay.hidden = false;
+      dragDepth++;
+      if (e.dataTransfer?.types?.includes('Files')) overlay.hidden = false;
+    });
+    window.addEventListener('dragover', (e) => { e.preventDefault(); });
+    window.addEventListener('dragleave', () => {
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) overlay.hidden = true;
     });
 
-    this.canvas.addEventListener('dragleave', () => {
-      overlay.hidden = true;
-    });
-
-    this.canvas.addEventListener('drop', async (e) => {
+    window.addEventListener('drop', async (e) => {
       e.preventDefault();
+      dragDepth = 0;
       overlay.hidden = true;
       const file = e.dataTransfer?.files[0];
       if (!file) return;
@@ -1610,12 +1616,15 @@ export class App {
       const fpsEl = document.getElementById('rd-fps');
       if (fpsEl) fpsEl.textContent = fps.toFixed(0);
       const cd = this.dragCalc?.getLastCd() ?? 0;
+      const cl = this.dragCalc?.getLastCl() ?? 0;
       const cdEl = document.getElementById('rd-cd');
       if (cdEl) cdEl.textContent = cd.toFixed(2);
+      const clEl = document.getElementById('rd-cl');
+      if (clEl) clEl.textContent = cl.toFixed(2);
 
       // Floating telemetry chips (new)
       const chipCd = document.getElementById('chip-cd');
-      if (chipCd) chipCd.textContent = cd > 0 ? cd.toFixed(2) : '—';
+      if (chipCd) chipCd.textContent = cd.toFixed(2);
       const chipFps = document.getElementById('chip-fps');
       if (chipFps) chipFps.textContent = fps.toFixed(0);
       const chipRe = document.getElementById('chip-re');
