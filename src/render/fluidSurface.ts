@@ -1459,12 +1459,15 @@ fn fs_obstacle(in : VOut) -> @location(0) vec4f {
   // Average ρ over six probe depths along the outward normal — single-probe
   // sampling was picking up per-step LBM compressibility noise + per-vertex
   // facet variation, producing visible per-frame flicker ("super jittery"
-  // user report). Spatial averaging across 1.5–6.5 cells out collapses that
-  // into a smooth, slowly-varying surface Cp.
-  let cellWorld = aabbSize.x / max(u.dims.x, 1.0);
+  // user report). Spatial averaging across ~1–4 % of the tunnel length out
+  // from the surface collapses that into a smooth, slowly-varying Cp.
+  // The fixed denominator (160 = default lattice W = 2 N at N=80) means
+  // probes stay at the same world distance independent of resolution; the
+  // smoothing is for visual stability, not physically calibrated depth.
+  let cellWorld = aabbSize.x / 160.0;
   var rhoSum : f32 = 0.0;
   for (var i : i32 = 0; i < 6; i = i + 1) {
-    let d = cellWorld * (1.5 + f32(i) * 1.0);     // 1.5, 2.5, 3.5, 4.5, 5.5, 6.5 cells out
+    let d = cellWorld * (1.5 + f32(i));     // 1.5, 2.5, 3.5, 4.5, 5.5, 6.5 cells out
     let probe = in.worldPos + nw * d;
     let uvw = clamp((probe - u.aabbMin.xyz) / aabbSize, vec3f(0.005), vec3f(0.995));
     rhoSum = rhoSum + textureSampleLevel(macrosTex, samp, uvw, 0.0).w;

@@ -177,40 +177,29 @@ export class LBM2D {
       }
       this.charLengthCells = Math.max(1, frontalCount);
     } else {
-      // Floor cavity: a rectangular notch cut INTO the floor (y = 0 .. cavityDepth)
-      // The cavity spans cavityW cells in X, centred on obstacleXFrac.
-      const cavityH = Math.max(3, Math.round(this.H * 0.25 * this.obstacleScale));
-      const cavityW = Math.max(6, Math.round(this.W * 0.18 * this.obstacleScale));
-      const xLo = Math.max(0, Math.round(cx - cavityW / 2));
-      const xHi = Math.min(this.W, xLo + cavityW);
-      // Floor: bottom row of solid cells (y=0). Cavity removes a section.
-      // Outside the cavity X range, y=0 is solid (floor). Inside cavity X
-      // range, the floor is removed and instead there's a U-shaped trench.
-      for (let x = 0; x < this.W; x++) {
-        if (x < xLo || x >= xHi) {
-          // Solid floor
-          m[0 * this.W + x] = 1;
-        } else {
-          // Trench bottom (cavityH cells below baseline)
-          // Since y=0 is the bottom of the domain, model the cavity by placing
-          // floor at y=cavityH AND walls at x=xLo and x=xHi from y=0 to y=cavityH-1
-          for (let y = 0; y <= cavityH; y++) {
-            if (y === cavityH) m[y * this.W + x] = 1;
+      // Floor cavity: a rectangular pit cut into the floor with freestream
+      // flow above. We place the floor surface at y = floorY (about 35% of
+      // H from the bottom), and below that everything is solid EXCEPT for a
+      // rectangular opening in the X range [xLo, xHi) — the cavity itself
+      // is then a U-shaped notch with three walls (left, bottom, right).
+      const floorY = Math.max(4, Math.round(this.H * 0.35));
+      const depth = Math.max(3, Math.round(this.H * 0.20 * this.obstacleScale));
+      const cavityW = Math.max(8, Math.round(this.W * 0.22 * this.obstacleScale));
+      const xLo = Math.max(2, Math.round(cx - cavityW / 2));
+      const xHi = Math.min(this.W - 2, xLo + cavityW);
+      const cavityBottomY = Math.max(1, floorY - depth);
+      for (let y = 0; y < this.H; y++) {
+        for (let x = 0; x < this.W; x++) {
+          let solid = false;
+          if (y < floorY) {
+            const inCavityX = (x >= xLo && x < xHi);
+            const inCavityY = (y >= cavityBottomY);
+            solid = !(inCavityX && inCavityY);
           }
+          if (solid) m[y * this.W + x] = 1;
         }
       }
-      // Cavity side walls
-      for (let y = 0; y < Math.max(3, Math.round(this.H * 0.25 * this.obstacleScale)); y++) {
-        if (xLo >= 0 && xLo < this.W) m[y * this.W + xLo] = 1;
-        if (xHi - 1 >= 0 && xHi - 1 < this.W) m[y * this.W + xHi - 1] = 1;
-      }
-      // Frontal length proxy = cavity depth
-      this.charLengthCells = cavityH;
-    }
-
-    // Top wall (y=H-1) as solid for the cavity case so flow channels above.
-    if (this.shape === 'cavity') {
-      for (let x = 0; x < this.W; x++) m[(this.H - 1) * this.W + x] = 1;
+      this.charLengthCells = depth;
     }
 
     this.device.queue.writeBuffer(this.maskBuf, 0, m.buffer);

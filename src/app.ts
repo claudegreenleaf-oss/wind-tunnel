@@ -161,6 +161,13 @@ export class App {
       if (this.config.mode2D) {
         // D2Q9 lattice for the 2D scenes. Domain is W×H × 1-cell-thick in Z
         // so the existing 3D renderers can sample its macros texture unchanged.
+        // Force a wider inlet in 2D — the existing 3D particle code spawns
+        // particles in a YZ disc of radius config.inletRadius. In 2D mode
+        // the Z dimension is thin and most of that disc lands outside the
+        // LBM2D's inlet band, so almost every particle reseed-loops every
+        // frame. Bumping the radius to 0.45 covers most of the Y band.
+        this.config.inletRadius = 0.45;
+        this.config.inlets[0]!.radius = 0.45;
         const lbm2 = new LBM2D(device, W, H);
         lbm2.uIn = this.config.uIn;
         lbm2.visc = this.config.visc;
@@ -1490,6 +1497,11 @@ export class App {
         }
       }
       this.lbm.setMaskBuffer(mask);
+      // Kill any particle currently inside the freshly-voxelized mask. The
+      // bounding-sphere kill misses cylinder caps / airfoil tips; this
+      // exact-mask sweep evicts them so they don't appear "stuck on the
+      // surface" while waiting to age out.
+      this.particles?.killParticlesInsideObstacle();
       this.dragCalc?.setFrontalArea(frontalCells);
       // Characteristic length ≈ √(frontal area). Drives Reynolds-number
       // display so the HUD shows U·D/ν, not U·N/4·1/ν. For a circular

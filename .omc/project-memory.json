@@ -32,7 +32,7 @@
     "runtime": null
   },
   "build": {
-    "buildCommand": "cd \"/Users/thomashome/CLAUDE CODE/wind-tunnel\" && npm run build 2>&1 | tail -40",
+    "buildCommand": "cd \"/Users/thomashome/CLAUDE CODE/wind-tunnel\" && npm run build 2>&1 | tail -15",
     "testCommand": null,
     "lintCommand": null,
     "devCommand": "npm run dev",
@@ -143,8 +143,8 @@
   "hotPaths": [
     {
       "path": "src/app.ts",
-      "accessCount": 7,
-      "lastAccessed": 1779379387455,
+      "accessCount": 9,
+      "lastAccessed": 1779380136347,
       "type": "file"
     },
     {
@@ -154,15 +154,15 @@
       "type": "file"
     },
     {
-      "path": "src/obstacles/voxelizeAnyMesh.ts",
-      "accessCount": 2,
-      "lastAccessed": 1779379395295,
+      "path": "src/render/fluidSurface.ts",
+      "accessCount": 5,
+      "lastAccessed": 1779380121365,
       "type": "file"
     },
     {
-      "path": "src/render/fluidSurface.ts",
+      "path": "src/obstacles/voxelizeAnyMesh.ts",
       "accessCount": 2,
-      "lastAccessed": 1779380077610,
+      "lastAccessed": 1779379395295,
       "type": "file"
     },
     {
@@ -223,6 +223,18 @@
       "path": "index.html",
       "accessCount": 1,
       "lastAccessed": 1779379164207,
+      "type": "file"
+    },
+    {
+      "path": ".playwright-mcp/cylinder-after-fix.png",
+      "accessCount": 1,
+      "lastAccessed": 1779380170940,
+      "type": "file"
+    },
+    {
+      "path": ".playwright-mcp/naca-2412-after-fix.png",
+      "accessCount": 1,
+      "lastAccessed": 1779380193525,
       "type": "file"
     }
   ],
