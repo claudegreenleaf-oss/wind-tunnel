@@ -195,7 +195,9 @@ fn fs_main(in : FragIn) -> @location(0) vec4<f32> {
     let dye = textureSampleLevel(dyeTex, linearSamp, uvwWarped, 0.0);
     let dyeIntensity = clamp(length(dye.rgb), 0.0, 1.5);
     let smokeMask = clamp(fbm3(worldP * 4.0 + vec3(0.0, 0.0, timeT)) * 1.4, 0.0, 1.2);
-    let density = dyeIntensity * 0.95 + speedN * 0.35 * smokeMask;
+    // Speed-driven smoke is the default volumetric (no dye required), so its
+    // contribution is the dominant term until the user injects.
+    let density = dyeIntensity * 0.95 + speedN * 1.3 * smokeMask;
 
     // Henyey-Greenstein-ish forward scatter so smoke catches light from behind.
     let cosA = dot(rd, normalize(macros.xyz + vec3(1e-4)));
@@ -204,7 +206,7 @@ fn fs_main(in : FragIn) -> @location(0) vec4<f32> {
 
     // Per-step alpha kept small so dense regions still let light through —
     // gives that wispy translucent quality instead of an opaque wall.
-    let alpha = clamp(density * 0.045, 0.0, 0.18);
+    let alpha = clamp(density * 0.11, 0.0, 0.40);
 
     // Color: dye dominates where present; speed-driven turbo elsewhere.
     let speedColor = turbo(0.15 + speedN * 0.85);

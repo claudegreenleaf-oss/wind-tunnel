@@ -20,8 +20,8 @@
 
 import * as THREE from 'three';
 
-const TRACE_LEN = 24;      // steps per ribbon
-const N_SEEDS   = 5_000;   // number of seed points
+const TRACE_LEN = 64;      // steps per ribbon (longer = clearer streamlines)
+const N_SEEDS   = 800;     // fewer seeds → distinct ribbons instead of a noise wall
 
 // ─── Compute shader ──────────────────────────────────────────────────────────
 
@@ -54,18 +54,20 @@ struct Vertex {
 const TRACE_LEN : u32 = ${TRACE_LEN}u;
 const N_SEEDS   : u32 = ${N_SEEDS}u;
 
-// Sample velocity from the macros texture. macros layout: (rho, ux, uy, uz)
-// stored in a 3D RGBA32F texture. We normalise world coords → [0,1] UV.
+// Sample velocity from the macros texture. macros layout: (ux, uy, uz, rho)
+// stored in a 3D RGBA32F texture — same convention as dragCoeff/volume/slice.
 fn sampleVelocity(worldPos : vec3<f32>) -> vec3<f32> {
   let aabbSize = u.aabbMax.xyz - u.aabbMin.xyz;
   let uv = (worldPos - u.aabbMin.xyz) / aabbSize;
   if any(uv < vec3(0.0)) || any(uv > vec3(1.0)) { return vec3(0.0); }
   let s = textureSampleLevel(macrosTex, samp, uv, 0.0);
-  // s.r = rho, s.gba = (ux, uy, uz)
-  // Map LBM lattice velocity → world velocity: scale by (lattice-cells / world-unit).
-  // The lattice has W cells along X spanning aabbSize.x world units.
-  let wScale = f32(u.dims.x) / aabbSize.x;
-  return s.gba * wScale;
+  // LBM velocity is in cells-per-step. To advect in world coords we multiply
+  // by (world-per-cell) = aabbSize.x / dims.x. With typical lattice u ≈ 0.1
+  // and AABB side 1.0, dt=0.08 gives ~0.0001 world units / frame — far too
+  // slow for a 64-step ribbon. Scale up so a streamline traverses ~half the
+  // domain over its trace length.
+  let wScale = aabbSize.x / f32(u.dims.x);
+  return s.xyz * wScale * 60.0;
 }
 
 // RK4 step: advance worldPos by dt through velocity field.
