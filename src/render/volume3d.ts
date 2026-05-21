@@ -64,7 +64,7 @@ struct Uniforms {
   aabbMax        : vec4<f32>,
   stepCount      : f32,
   timeSeed       : f32,
-  _pad1          : f32,
+  uIn            : f32,
   _pad2          : f32,
 }
 @group(0) @binding(0) var macrosTex   : texture_3d<f32>;
@@ -169,64 +169,56 @@ fn fs_main(in : FragIn) -> @location(0) vec4<f32> {
   var accumColor = vec3(0.0);
   var transmit   = 1.0;
 
+  // Freestream Cp baseline — sampled at the top-corner of the AABB where flow
+  // is far from the obstacle and the LBM bulk density is closest to "true"
+  // freestream. We subtract this so the volume shows local deviations
+  // (stagnation / suction) rather than LBM's intrinsic baseline offset.
+  let baseRho_v = (
+      textureSampleLevel(macrosTex, linearSamp, vec3<f32>(0.5, 0.95, 0.05), 0.0).w
+    + textureSampleLevel(macrosTex, linearSamp, vec3<f32>(0.5, 0.05, 0.95), 0.0).w
+    + textureSampleLevel(macrosTex, linearSamp, vec3<f32>(0.5, 0.95, 0.95), 0.0).w
+    + textureSampleLevel(macrosTex, linearSamp, vec3<f32>(0.5, 0.05, 0.05), 0.0).w
+  ) * 0.25;
+  let denom_v   = max(0.5 * u.uIn * u.uIn, 1e-5);
+  let baseCp_v  = ((baseRho_v - 1.0) * (1.0 / 3.0)) / denom_v;
+
   for (var i = 0; i < nSteps; i++) {
     let tSample = tNear + (f32(i) + jitter) * stepSize;
     let worldP  = ro + rd * tSample;
     var uvw     = (worldP - aMin) / aabbSize;
     if any(uvw < vec3(0.0)) || any(uvw > vec3(1.0)) { continue; }
+    // Skip the very-inlet slab — its forced-injection density would otherwise
+    // dominate the heatmap; we want the OBSTACLE'S pressure field, not the
+    // boundary condition.
+    if (uvw.x < 0.05) { continue; }
 
-    // Granular smoke detail: warp sample coords by 2-octave noise + slow time animation.
-    // This breaks the "soft blob" look into wispy filaments.
-    let nFreq = 7.5;
-    let warp = vec3(
-      fbm3(worldP * nFreq + vec3(0.0, 0.0, timeT)),
-      fbm3(worldP * nFreq + vec3(13.1, 7.3, timeT + 19.0)),
-      fbm3(worldP * nFreq + vec3(29.7, 41.2, timeT + 53.0)),
-    ) - 0.5;
-    let warpStrength = 0.012;
-    let uvwWarped = clamp(uvw + warp * warpStrength, vec3(0.0), vec3(1.0));
+    // Drag-mode: sample LBM pressure → Cp → density-as-|Cp|, colour by sign.
+    // High |Cp| regions read as visible "bubbles" of red (stagnation, in
+    // front of the object) and blue (suction, around the shoulders + wake).
+    let macros = textureSampleLevel(macrosTex, linearSamp, uvw, 0.0);
+    let rho    = macros.w;
+    let pLat   = (rho - 1.0) * (1.0 / 3.0);
+    let denom  = max(0.5 * u.uIn * u.uIn, 1e-5);
+    let cp     = pLat / denom;
+    // Slight noise breaks the soft-blob look without changing the physics.
+    let jitterNoise = fbm3(worldP * 6.0 + vec3(0.0, 0.0, timeT)) * 0.15 + 0.85;
 
-    let macros = textureSampleLevel(macrosTex, linearSamp, uvwWarped, 0.0);
-    let speed  = length(macros.xyz);
-    let speedN = clamp(speed / 0.14, 0.0, 1.0);
+    // Subtract the precomputed freestream baseline so only deviations show.
+    let cpRel = cp - baseCp_v;
+    let cpAbs  = clamp(abs(cpRel), 0.0, 2.0);
 
-    // Long wisps stretched along the local flow direction. fbm sampled at a
-    // worldP that's been "pulled back" along the flow produces streaky filaments
-    // instead of isotropic blobs.
-    let flowDir = macros.xyz / max(speed, 1e-4);
-    let stretch = worldP - flowDir * 0.6;
-    let wisp = clamp(
-      fbm3(stretch * 4.0 + vec3(0.0, 0.0, timeT)) * 1.5
-      + fbm3(worldP * 14.0 + vec3(5.0, 9.0, timeT * 1.7)) * 0.55
-      - 0.3,
-      0.0, 1.8);
+    // Suction / stagnation pockets visible once deviation rises above the
+    // freestream noise floor (~0.08 Cp), saturating at strong deviation (~0.7).
+    let density = smoothstep(0.08, 0.7, cpAbs) * jitterNoise;
+    let alpha   = clamp(density * 0.6, 0.0, 0.6);
 
-    let dye = textureSampleLevel(dyeTex, linearSamp, uvwWarped, 0.0);
-    let dyeIntensity = clamp(length(dye.rgb), 0.0, 1.5);
+    // cpRel ∈ [-2, +2] → turbo. Negative = suction (cool blue), positive = stagnation (hot red).
+    let cpN = clamp((cpRel + 1.5) / 3.0, 0.0, 1.0);
+    let col = turbo(cpN);
 
-    // Cubic ramp on speed so empty-air is genuinely transparent and bulk-flow
-    // is strong; without this every voxel has a baseline haze.
-    let speedDensity = speedN * speedN * (3.0 - 2.0 * speedN);
-    let density = dyeIntensity * 1.4 + speedDensity * 5.5 * wisp;
-
-    // Henyey-Greenstein forward scatter — strong forward gain
-    let cosA = dot(rd, flowDir);
-    let g = 0.6;
-    let phase = (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * cosA, 1.5);
-
-    let alpha = clamp(density * 0.32, 0.0, 0.85);
-
-    // Turbo gradient with cubic ramp shoves more pixels into the warm half,
-    // and self-emission lights up the fast regions.
-    let warm = clamp(pow(speedN, 0.65), 0.0, 1.0);
-    let speedColor = turbo(0.05 + warm * 0.92);
-    let emissive   = pow(speedN, 2.0) * 1.2;
-    let glow = mix(speedColor * (0.6 + emissive), dye.rgb * 2.0, clamp(dyeIntensity, 0.0, 1.0));
-    let scattered = glow * (0.9 + 0.8 * phase);
-
-    accumColor += transmit * alpha * scattered;
+    accumColor += transmit * alpha * col * 1.3;
     transmit   *= 1.0 - alpha;
-    if transmit < 0.05 { break; }
+    if transmit < 0.03 { break; }
   }
 
   let outA = (1.0 - transmit) * 0.95;
@@ -359,25 +351,20 @@ export class VolumeRenderer {
     aabbMin: THREE.Vector3,
     aabbMax: THREE.Vector3,
     stepCount = 48,
+    uIn = 0.1,
   ) {
     if (!this.pipeline || !this.bindGroup) return;
 
-    // Pack uniforms
     const data = new Float32Array(48); // 192 bytes / 4
-    // viewMatrix (offset 0, 16 floats)
     data.set(viewMatrix.elements, 0);
-    // projMatrix (offset 16, 16 floats)
     data.set(projMatrix.elements, 16);
-    // cameraPos (offset 32)
     data[32] = cameraPos.x; data[33] = cameraPos.y; data[34] = cameraPos.z; data[35] = 1;
-    // aabbMin (offset 36)
     data[36] = aabbMin.x; data[37] = aabbMin.y; data[38] = aabbMin.z; data[39] = 0;
-    // aabbMax (offset 40)
     data[40] = aabbMax.x; data[41] = aabbMax.y; data[42] = aabbMax.z; data[43] = 0;
-    // stepCount + timeSeed (offset 44, 45)
     data[44] = stepCount;
     data[45] = this.frame++;
-    data[46] = 0; data[47] = 0;
+    data[46] = uIn;
+    data[47] = 0;
 
     this.device.queue.writeBuffer(this.uniformBuf, 0, data.buffer);
 

@@ -1611,16 +1611,29 @@ export class App {
         this.fluidSurface.renderRawSpheres(view, proj, sphereSize, t, aabbMin, aabbMax);
 
       } else if (this.viewMode === 'streamlines' && this.streamlines) {
-        // ── Streamlines ── RK4 ribbons.
+        // ── Streamlines ── RK4 ribbons + Cp-shaded obstacle.
+        // Draw the obstacle into the canvas before the streamline pass so its
+        // pixels sit underneath the ribbons (streamlines blend over with their
+        // own alpha, the obstacle remains visible through gaps).
+        if (this.fluidSurface && this.obstacleMesh) {
+          this.obstacleMesh.updateMatrixWorld();
+          this.fluidSurface.setObstacleTransform(view, proj, this.obstacleMesh.matrixWorld);
+          this.fluidSurface.setObstacleFlowParams(aabbMin, aabbMax, this.config.uIn);
+          this.fluidSurface.renderObstacleOnly();
+        }
         const slDt = this.config.paused ? 0 : 0.08 * this.config.simSpeed;
         this.streamlines.render(view, proj, aabbMin, aabbMax, { W, H, D }, slDt);
 
-      } else if (this.viewMode === 'drag' && this.fluidSurface) {
+      } else if (this.viewMode === 'drag' && this.fluidSurface && this.volumeRenderer && this.dye) {
         // ── Drag visualization ──
-        // Render the obstacle with surface Cp = (ρ−1)·cs² / (½·uIn²) sampled
-        // from the live LBM density field. Red on windward stagnation faces
-        // (Cp ≈ +1, the main drag-contributing areas); blue on leeward
-        // suction (Cp < 0).
+        // 1) Volumetric Cp field: red bubbles in front of the obstacle
+        //    (stagnation, drag contributors) and blue bubbles around the
+        //    shoulders / wake (suction). Sampled from the live LBM density
+        //    via Cp = (ρ-1)·cs²/(½·U_in²); freestream noise (Cp ≈ 0) reads
+        //    transparent so the heatmap shows only where pressure deviates.
+        // 2) Obstacle Cp surface drawn on top with full opacity.
+        this.volumeRenderer.setTextures(this.lbm.macrosTextureView, this.dye.currentView);
+        this.volumeRenderer.render(view, proj, camPos, aabbMin, aabbMax, 40, this.config.uIn);
         if (this.obstacleMesh) {
           this.obstacleMesh.updateMatrixWorld();
           this.fluidSurface.setObstacleTransform(view, proj, this.obstacleMesh.matrixWorld);
