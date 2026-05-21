@@ -1,0 +1,230 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1779379022723,
+  "projectRoot": "/Users/thomashome/CLAUDE CODE/wind-tunnel",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      },
+      {
+        "name": "TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "tsconfig.json"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "vite",
+        "version": "8.0.12",
+        "category": "build"
+      }
+    ],
+    "packageManager": "npm",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "cd \"/Users/thomashome/CLAUDE CODE/wind-tunnel\" && npm run build 2>&1 | tail -40",
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": "npm run dev",
+    "scripts": {
+      "dev": "vite",
+      "build": "vite build",
+      "typecheck": "tsc --noEmit",
+      "preview": "vite preview"
+    }
+  },
+  "conventions": {
+    "namingStyle": "camelCase/PascalCase",
+    "importStyle": "ES modules",
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "public",
+      "src"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "dist": {
+      "path": "dist",
+      "purpose": "Distribution/build output",
+      "fileCount": 2,
+      "lastAccessed": 1779379022464,
+      "keyFiles": [
+        "favicon.svg",
+        "index.html"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 1,
+      "lastAccessed": 1779379022469,
+      "keyFiles": [
+        "preview.png"
+      ]
+    },
+    "public": {
+      "path": "public",
+      "purpose": "Public files",
+      "fileCount": 1,
+      "lastAccessed": 1779379022514,
+      "keyFiles": [
+        "favicon.svg"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 5,
+      "lastAccessed": 1779379022526,
+      "keyFiles": [
+        "app.ts",
+        "config.ts",
+        "main.ts",
+        "style.css"
+      ]
+    },
+    "dist/assets": {
+      "path": "dist/assets",
+      "purpose": "Static assets",
+      "fileCount": 4,
+      "lastAccessed": 1779379022538,
+      "keyFiles": [
+        "app-BPxBz3wr.js",
+        "index-39BtEYn6.css",
+        "index-zHGRcNnH.js"
+      ]
+    },
+    "dist/models": {
+      "path": "dist/models",
+      "purpose": "Data models",
+      "fileCount": 1,
+      "lastAccessed": 1779379022548,
+      "keyFiles": [
+        "clipped.stl"
+      ]
+    },
+    "public/models": {
+      "path": "public/models",
+      "purpose": "Data models",
+      "fileCount": 1,
+      "lastAccessed": 1779379022563,
+      "keyFiles": [
+        "clipped.stl"
+      ]
+    },
+    "src/tests": {
+      "path": "src/tests",
+      "purpose": "Test files",
+      "fileCount": 1,
+      "lastAccessed": 1779379022572,
+      "keyFiles": [
+        "physicsTests.ts"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "src/app.ts",
+      "accessCount": 7,
+      "lastAccessed": 1779379387455,
+      "type": "file"
+    },
+    {
+      "path": "src/render/particles3d.ts",
+      "accessCount": 6,
+      "lastAccessed": 1779380037053,
+      "type": "file"
+    },
+    {
+      "path": "src/obstacles/voxelizeAnyMesh.ts",
+      "accessCount": 2,
+      "lastAccessed": 1779379395295,
+      "type": "file"
+    },
+    {
+      "path": "src/render/fluidSurface.ts",
+      "accessCount": 2,
+      "lastAccessed": 1779380077610,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 1,
+      "lastAccessed": 1779379109643,
+      "type": "file"
+    },
+    {
+      "path": "package.json",
+      "accessCount": 1,
+      "lastAccessed": 1779379109950,
+      "type": "file"
+    },
+    {
+      "path": "src/main.ts",
+      "accessCount": 1,
+      "lastAccessed": 1779379118113,
+      "type": "file"
+    },
+    {
+      "path": "src/config.ts",
+      "accessCount": 1,
+      "lastAccessed": 1779379118410,
+      "type": "file"
+    },
+    {
+      "path": "src/sim/voxelize.ts",
+      "accessCount": 1,
+      "lastAccessed": 1779379127953,
+      "type": "file"
+    },
+    {
+      "path": "src/obstacles/loadRemote.ts",
+      "accessCount": 1,
+      "lastAccessed": 1779379136394,
+      "type": "file"
+    },
+    {
+      "path": "src/obstacles/modelRegistry.ts",
+      "accessCount": 1,
+      "lastAccessed": 1779379137733,
+      "type": "file"
+    },
+    {
+      "path": "src/obstacles/upload.ts",
+      "accessCount": 1,
+      "lastAccessed": 1779379138078,
+      "type": "file"
+    },
+    {
+      "path": "src/sim/lbm3d.ts",
+      "accessCount": 1,
+      "lastAccessed": 1779379155056,
+      "type": "file"
+    },
+    {
+      "path": "index.html",
+      "accessCount": 1,
+      "lastAccessed": 1779379164207,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

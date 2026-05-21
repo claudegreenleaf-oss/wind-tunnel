@@ -18,7 +18,11 @@
 
 import * as THREE from 'three';
 
-const SAMPLES_PER_AXIS = 16;      // 16×16 = 256 samples per triangle
+// 24 chosen so each triangle gets (24+1)(24+2)/2 = 325 barycentric samples.
+// At 16 (153 samples) thin airfoil triangles left collision-mask pin-holes —
+// particles tunneled through the leading edge at lattice N≥80. 24 closes
+// those gaps without making rebuilds noticeably slower.
+const SAMPLES_PER_AXIS = 24;
 
 export function voxelizeAnyMesh(
   geometry: THREE.BufferGeometry,

@@ -49,6 +49,10 @@ export interface SimConfig {
   // Time
   paused: boolean;
   simSpeed: number;   // 0.1x – 4x
+  /** 2D mode: swap the 3D LBM for a D2Q9 lattice with top-down camera. */
+  mode2D: boolean;
+  /** When mode2D, which scene: 'circle' (cylinder cross-flow) or 'cavity' (floor trench). */
+  scene2D: 'circle' | 'cavity';
 }
 
 export function defaultConfig(): SimConfig {
@@ -87,11 +91,16 @@ export function defaultConfig(): SimConfig {
     dyeAmount: 1.0,
     paused: false,
     simSpeed: 1.0,
+    mode2D: false,
+    scene2D: 'circle',
   };
 }
 
-export function latticeDims(N: number): { W: number; H: number; D: number } {
-  return { W: 2 * N, H: N, D: N };
+export function latticeDims(N: number, mode2D = false): { W: number; H: number; D: number } {
+  // 2D mode collapses the Z direction to a single lattice cell so the LBM2D
+  // macros texture (W×H×1) matches every renderer's expectations and the
+  // particle solid-mask reads stay in bounds.
+  return { W: 2 * N, H: N, D: mode2D ? 1 : N };
 }
 
 /**

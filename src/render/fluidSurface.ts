@@ -1456,26 +1456,31 @@ fn fs_obstacle(in : VOut) -> @location(0) vec4f {
     + textureSampleLevel(macrosTex, samp, vec3f(0.5, 0.05, 0.05), 0.0).w
   );
 
-  // Single linear-interpolated probe just outside the surface. The sampler
-  // smooths across neighbouring LBM cells, so the result is a continuous Cp
-  // field on the obstacle rather than blocky cell-coloured patches.
-  let cellWorld = aabbSize.x / 80.0;
-  let probe = in.worldPos + nw * cellWorld * 1.8;
-  let uvw = clamp((probe - u.aabbMin.xyz) / aabbSize, vec3f(0.005), vec3f(0.995));
-  let rhoSurf = textureSampleLevel(macrosTex, samp, uvw, 0.0).w;
+  // Average ρ over six probe depths along the outward normal — single-probe
+  // sampling was picking up per-step LBM compressibility noise + per-vertex
+  // facet variation, producing visible per-frame flicker ("super jittery"
+  // user report). Spatial averaging across 1.5–6.5 cells out collapses that
+  // into a smooth, slowly-varying surface Cp.
+  let cellWorld = aabbSize.x / max(u.dims.x, 1.0);
+  var rhoSum : f32 = 0.0;
+  for (var i : i32 = 0; i < 6; i = i + 1) {
+    let d = cellWorld * (1.5 + f32(i) * 1.0);     // 1.5, 2.5, 3.5, 4.5, 5.5, 6.5 cells out
+    let probe = in.worldPos + nw * d;
+    let uvw = clamp((probe - u.aabbMin.xyz) / aabbSize, vec3f(0.005), vec3f(0.995));
+    rhoSum = rhoSum + textureSampleLevel(macrosTex, samp, uvw, 0.0).w;
+  }
+  let rhoSurf = rhoSum / 6.0;
 
   let pLattice = (rhoSurf - baseRho) * (1.0 / 3.0);
-  // Amplify hard — LBM ρ deviations on the obstacle surface are typically
-  // tiny (~0.001-0.005), so without a big gain the whole surface clusters
-  // around mid-green. 4x amplification spreads the visible signal across
-  // the full ramp.
-  let cpLBM = pLattice / denom * 4.0;
+  // Smaller LBM gain (was 4×) plus larger probe ensemble keeps the signal
+  // alive without amplifying noise across the colour ramp every frame.
+  let cpLBM = pLattice / denom * 1.5;
 
-  // Direction-based proxy gives the visualisation a meaningful baseline
-  // before the LBM has built up real pressure variation. Weighted lightly
-  // so it doesn't override true CFD data.
+  // Direction-based proxy: smooth function of surface normal, no temporal
+  // noise. Heavier weight now compensates for the reduced LBM gain so the
+  // overall Cp range is similar.
   let frontness = clamp(dot(nw, u.upstream.xyz), -1.0, 1.0);
-  let cp = clamp(cpLBM + frontness * 0.6, -1.5, 1.5);
+  let cp = clamp(cpLBM + frontness * 0.85, -1.5, 1.5);
 
   // Tighter mapping range: most data falls in ±0.6, so use that as the
   // colour span (rather than ±1.5) for dramatic gradients.

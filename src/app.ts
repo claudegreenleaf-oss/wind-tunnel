@@ -12,6 +12,7 @@ import { REMOTE_MODELS, getRemoteModel, type RemoteModel } from './obstacles/mod
 import { loadRemoteModel } from './obstacles/loadRemote';
 import { defaultConfig, latticeDims, computeRe } from './config';
 import { LBM3D } from './sim/lbm3d';
+import { LBM2D } from './sim/lbm2d';
 import { DyeField3D } from './sim/dye3d';
 import { VolumeRenderer } from './render/volume3d';
 import { ParticleSystem } from './render/particles3d';
@@ -36,7 +37,17 @@ import { StreamlineRenderer } from './render/streamlines';
  */
 export class App {
   private readonly canvas: HTMLCanvasElement;
-  private readonly config = defaultConfig();
+  private readonly config = (() => {
+    const c = defaultConfig();
+    // mode2D + scene2D persist across reloads because changing them requires
+    // a full LBM/renderer rebuild — easiest path is reload page on toggle.
+    try {
+      if (localStorage.getItem('wt-mode2d') === '1') c.mode2D = true;
+      const s = localStorage.getItem('wt-scene2d');
+      if (s === 'circle' || s === 'cavity') c.scene2D = s;
+    } catch {}
+    return c;
+  })();
 
   private renderer!: WebGPURenderer;
   private scene!: THREE.Scene;
@@ -47,7 +58,7 @@ export class App {
   private obstacleMesh: THREE.Mesh | THREE.Group | null = null;
   private floorMesh: THREE.Mesh | null = null;
 
-  private lbm: LBM3D | null = null;
+  private lbm: LBM3D | LBM2D | null = null;
   private dye: DyeField3D | null = null;
   private volumeRenderer: VolumeRenderer | null = null;
   private particles: ParticleSystem | null = null;
@@ -100,12 +111,23 @@ export class App {
     this.scene.fog = new THREE.FogExp2(0x07070b, 0.04);
 
     this.camera = new THREE.PerspectiveCamera(45, this.canvas.clientWidth / this.canvas.clientHeight, 0.1, 200);
-    this.camera.position.set(8, 4, 8);
+    if (this.config.mode2D) {
+      // Top-down looking down -Z at the LBM2D plane (XY). Camera distance
+      // 13 with FOV 45° fits the AABB (sx=10, sy=5) comfortably.
+      this.camera.position.set(0, 0, 13);
+      this.camera.up.set(0, 1, 0);
+    } else {
+      this.camera.position.set(8, 4, 8);
+    }
 
     this.controls = new OrbitControls(this.camera, this.canvas);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.target.set(0, 0, 0);
+    // (2D mode: leave orbit unlocked until we're sure the default top-down
+    // pose actually shows the scene properly; tightening to a fixed pose
+    // before the rest of the pipeline is verified just makes debugging
+    // harder.)
 
     // Lighting: key + rim, plus a soft ambient.
     this.scene.add(new THREE.AmbientLight(0xffffff, 0.15));
@@ -135,18 +157,29 @@ export class App {
       console.error('WebGPU device not available on renderer.backend.device');
     } else {
       this._gpuDevice = device;
-      const { W, H, D } = latticeDims(this.config.N);
-      this.lbm = new LBM3D(device, W, H, D);
-      this.lbm.uIn = this.config.uIn;
-      this.lbm.visc = this.config.visc;
-      this.lbm.aoaRad = (this.config.aoaDeg * Math.PI) / 180;
-      this.lbm.gravity = this.config.gravity;
-      this.lbm.inletR = this.config.inletRadius;
-      // Only the parametric primitives have an LBM-side voxelizer; remote
-      // models flow through rebuildObstacle → uploadObstacleToFluidSurface.
-      const BUILTINS: ReadonlySet<string> = new Set(['sphere', 'cylinder', 'cone', 'wing', 'teapot']);
-      if (BUILTINS.has(this.config.shapeId)) {
-        this.lbm.setShape(this.config.shapeId as ShapeId);
+      const { W, H, D } = latticeDims(this.config.N, this.config.mode2D);
+      if (this.config.mode2D) {
+        // D2Q9 lattice for the 2D scenes. Domain is W×H × 1-cell-thick in Z
+        // so the existing 3D renderers can sample its macros texture unchanged.
+        const lbm2 = new LBM2D(device, W, H);
+        lbm2.uIn = this.config.uIn;
+        lbm2.visc = this.config.visc;
+        lbm2.inletR = this.config.inletRadius;
+        lbm2.setShape(this.config.scene2D, this.config.obstacleXFrac, this.config.scaleMul);
+        this.lbm = lbm2;
+      } else {
+        this.lbm = new LBM3D(device, W, H, D);
+        this.lbm.uIn = this.config.uIn;
+        this.lbm.visc = this.config.visc;
+        this.lbm.aoaRad = (this.config.aoaDeg * Math.PI) / 180;
+        this.lbm.gravity = this.config.gravity;
+        this.lbm.inletR = this.config.inletRadius;
+        // Only the parametric primitives have an LBM-side voxelizer; remote
+        // models flow through rebuildObstacle → uploadObstacleToFluidSurface.
+        const BUILTINS: ReadonlySet<string> = new Set(['sphere', 'cylinder', 'cone', 'wing', 'teapot']);
+        if (BUILTINS.has(this.config.shapeId)) {
+          this.lbm.setShape(this.config.shapeId as ShapeId);
+        }
       }
 
       // Phase 3: 3D dye field
@@ -188,7 +221,7 @@ export class App {
         this.particles.N,
       );
       this.fluidSurface.setMacrosTexture(this.lbm.macrosTextureView);
-      this.fluidSurface.setMaskBuffer(this.lbm.maskBuffer, latticeDims(this.config.N));
+      this.fluidSurface.setMaskBuffer(this.lbm.maskBuffer, latticeDims(this.config.N, this.config.mode2D));
 
       // Streamline renderer — RK4-advected ribbons through the velocity field.
       this.streamlines = new StreamlineRenderer(
@@ -213,7 +246,7 @@ export class App {
       // Drag coefficient: integrates pressure × normal over fluid–solid faces
       // every ~500 ms and reports Cd into the HUD.
       this.dragCalc = new DragCoeffCalc(device);
-      this.dragCalc.setInputs(this.lbm.macrosTextureView, this.lbm.maskBuffer, latticeDims(this.config.N));
+      this.dragCalc.setInputs(this.lbm.macrosTextureView, this.lbm.maskBuffer, latticeDims(this.config.N, this.config.mode2D));
       this.dragCalc.setUIn(this.config.uIn);
       this.dragCalc.setVisc(this.config.visc);
 
@@ -253,7 +286,7 @@ export class App {
     nSlider.value = String(this.config.N);
     const updateNLabel = () => {
       nVal.textContent = String(this.config.N);
-      const { W, H, D } = latticeDims(this.config.N);
+      const { W, H, D } = latticeDims(this.config.N, this.config.mode2D);
       const cells = W * H * D;
       const mb = Math.round((cells * 19 * 4 * 2) / (1024 * 1024));
       cellsHint.textContent = `${W}×${H}×${D} = ${cells.toLocaleString()} cells · ${mb} MB f-buffers`;
@@ -337,6 +370,30 @@ export class App {
     speedMul.addEventListener('input', () => {
       this.config.simSpeed = parseFloat(speedMul.value);
       speedMulVal.textContent = `${this.config.simSpeed.toFixed(2)}×`;
+    });
+
+    // 2D mode toggle + scene selector. Changing mode reloads the page so we
+    // don't have to tear down and rebuild every renderer's bind groups.
+    const mode2DCb = q<HTMLInputElement>('#cb-mode2d');
+    const rowScene2D = q<HTMLDivElement>('#row-scene2d');
+    const scene2DSel = q<HTMLSelectElement>('#sel-scene2d');
+    mode2DCb.checked = this.config.mode2D;
+    scene2DSel.value = this.config.scene2D;
+    rowScene2D.hidden = !this.config.mode2D;
+    mode2DCb.addEventListener('change', () => {
+      try {
+        if (mode2DCb.checked) localStorage.setItem('wt-mode2d', '1');
+        else localStorage.removeItem('wt-mode2d');
+      } catch {}
+      location.reload();
+    });
+    scene2DSel.addEventListener('change', () => {
+      const v = scene2DSel.value as 'circle' | 'cavity';
+      this.config.scene2D = v;
+      try { localStorage.setItem('wt-scene2d', v); } catch {}
+      if (this.lbm instanceof LBM2D) {
+        this.lbm.setShape(v, this.config.obstacleXFrac, this.config.scaleMul);
+      }
     });
 
     const shapeSelect = q<HTMLSelectElement>('#shape-select');
@@ -526,7 +583,7 @@ export class App {
           const { sx, sy, sz } = this.latticeWorld();
           const aabbMin = new THREE.Vector3(-sx * 0.5, -sy * 0.5, -sz * 0.5);
           const aabbMax = new THREE.Vector3(sx * 0.5, sy * 0.5, sz * 0.5);
-          const { W, H, D } = latticeDims(this.config.N);
+          const { W, H, D } = latticeDims(this.config.N, this.config.mode2D);
           this.particles.advectOnly(view, proj, camPos, aabbMin, aabbMax, { W, H, D });
         }
       }
@@ -794,7 +851,7 @@ export class App {
 
   private applyResolution() {
     if (!this.lbm || !this._gpuDevice) return;
-    const { W, H, D } = latticeDims(this.config.N);
+    const { W, H, D } = latticeDims(this.config.N, this.config.mode2D);
     this.lbm.resize(W, H, D);
     // LBM resize destroys + reallocates its macros texture and mask buffer.
     // Rebuild the dye field at the new dims, then rebind all downstream
@@ -828,7 +885,7 @@ export class App {
 
   private latticeWorld() {
     // Map lattice cells to world units. We pick W=10 wide (in world space).
-    const { W, H, D } = latticeDims(this.config.N);
+    const { W, H, D } = latticeDims(this.config.N, this.config.mode2D);
     const worldWidth = 10;
     const cell = worldWidth / W;
     return { sx: W * cell, sy: H * cell, sz: D * cell, cell };
@@ -861,7 +918,7 @@ export class App {
 
   /** Push the current inlet array into LBM3D + ParticleSystem. */
   private syncInletsToGpu() {
-    if (this.lbm) this.lbm.inlets = this.config.inlets.map((i) => ({ ...i }));
+    if (this.lbm instanceof LBM3D) this.lbm.inlets = this.config.inlets.map((i) => ({ ...i }));
     if (this.particles) this.particles.inlets = this.config.inlets.map((i) => ({ ...i }));
   }
 
@@ -1100,6 +1157,10 @@ export class App {
       this.disposeMeshOrGroup(this.obstacleMesh);
       this.obstacleMesh = null;
     }
+    // 2D mode: LBM2D voxelizes its own scene internally; there's no
+    // Three.js obstacle mesh, and the LBM3D-only mask upload path doesn't
+    // apply.
+    if (this.config.mode2D) return;
     const { sx, sy } = this.latticeWorld();
     const x = -sx * 0.5 + sx * this.config.obstacleXFrac;
     const r = sy * 0.18;
@@ -1107,12 +1168,15 @@ export class App {
 
     switch (this.config.shapeId) {
       case 'cylinder': {
-        const geom = new THREE.CylinderGeometry(r, r, sy * 0.85, 48);
+        // Higher radial segment count → smoother round silhouette in the
+        // voxelized collision mask, eliminating polygonal stair-stepping in
+        // the wake when viewed end-on.
+        const geom = new THREE.CylinderGeometry(r, r, sy * 0.85, 96, 1);
         this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
         break;
       }
       case 'cone': {
-        const geom = new THREE.ConeGeometry(r, 2 * halfLen, 32);
+        const geom = new THREE.ConeGeometry(r, 2 * halfLen, 64);
         const mesh = new THREE.Mesh(geom, this.makeMat());
         // Apex points into the wind (-X), base trails downstream (+X) —
         // matches the voxelize convention.
@@ -1139,11 +1203,19 @@ export class App {
           if (p === 0) p = 0.5;
         }
         const shape = new THREE.Shape();
-        const pts = 48;
+        // Cosine-spaced sampling concentrates points at the leading and
+        // trailing edges where curvature is highest — standard practice for
+        // airfoil discretization. 200 chordwise samples give a smooth LE that
+        // voxelizes into a properly curved collision silhouette instead of a
+        // visibly faceted polygon.
+        const pts = 200;
         const topPts: THREE.Vector2[] = [];
         const botPts: THREE.Vector2[] = [];
+        const sxc = halfLen * 2;  // chord length in world units
         for (let i = 0; i <= pts; i++) {
-          const xc = i / pts;
+          // Cosine spacing: xc = ½(1 − cos(βπ)) packs samples near xc=0 and xc=1.
+          const beta = (Math.PI * i) / pts;
+          const xc = 0.5 * (1 - Math.cos(beta));
           const sq = Math.sqrt(Math.max(0, xc));
           const yt = 5 * tt * (0.2969 * sq - 0.126 * xc - 0.3516 * xc * xc + 0.2843 * xc * xc * xc - 0.1015 * xc * xc * xc * xc);
           let yc = 0, dyc_dx = 0;
@@ -1161,15 +1233,20 @@ export class App {
           const yu = yc + yt * Math.cos(theta);
           const xl = xc + yt * Math.sin(theta);
           const yl = yc - yt * Math.cos(theta);
-          const sxc = halfLen * 2;
-          topPts.push(new THREE.Vector2((xu - 0.5) * sxc, yu * sxc * 0.5));
-          botPts.push(new THREE.Vector2((xl - 0.5) * sxc, yl * sxc * 0.5));
+          // yu/yl are fractions of chord (per NACA polynomial); world-y must
+          // therefore be yu*sxc, not yu*sxc*0.5 — the old halving rendered a
+          // NACA 0012 at ~6 % thickness instead of the labelled 12 %.
+          topPts.push(new THREE.Vector2((xu - 0.5) * sxc, yu * sxc));
+          botPts.push(new THREE.Vector2((xl - 0.5) * sxc, yl * sxc));
         }
         shape.moveTo(topPts[0].x, topPts[0].y);
         for (let i = 1; i < topPts.length; i++) shape.lineTo(topPts[i].x, topPts[i].y);
         for (let i = botPts.length - 1; i >= 0; i--) shape.lineTo(botPts[i].x, botPts[i].y);
         shape.closePath();
-        const extrudeSettings = { depth: halfLen * 3, bevelEnabled: false };
+        // steps: span the extrusion across multiple Z slices so the
+        // barycentric voxel stamper fills the wing volume without striping
+        // gaps at high lattice resolutions.
+        const extrudeSettings = { depth: halfLen * 3, bevelEnabled: false, steps: 8, curveSegments: 32 };
         const geom = new THREE.ExtrudeGeometry(shape, extrudeSettings);
         geom.translate(0, 0, -halfLen * 1.5);
         const mesh = new THREE.Mesh(geom, this.makeMat());
@@ -1189,12 +1266,12 @@ export class App {
         break;
       }
       case 'torus': {
-        const geom = new THREE.TorusGeometry(r, r * 0.35, 24, 48);
+        const geom = new THREE.TorusGeometry(r, r * 0.35, 48, 96);
         this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
         break;
       }
       case 'capsule': {
-        const geom = new THREE.CapsuleGeometry(r * 0.55, r * 1.5, 12, 24);
+        const geom = new THREE.CapsuleGeometry(r * 0.55, r * 1.5, 24, 48);
         const mesh = new THREE.Mesh(geom, this.makeMat());
         mesh.rotation.z = Math.PI / 2;
         this.obstacleMesh = mesh;
@@ -1221,12 +1298,12 @@ export class App {
         break;
       }
       case 'teapot': {
-        const geom = new TeapotGeometry(r, 12);
+        const geom = new TeapotGeometry(r, 24);
         this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
         break;
       }
       case 'sphere': {
-        const geom = new THREE.SphereGeometry(r, 48, 32);
+        const geom = new THREE.SphereGeometry(r, 96, 64);
         this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
         break;
       }
@@ -1236,10 +1313,10 @@ export class App {
         // the .glb fetch is in flight, then swap once the geometry resolves.
         const model = getRemoteModel(this.config.shapeId);
         if (!model) {
-          const geom = new THREE.SphereGeometry(r, 48, 32);
+          const geom = new THREE.SphereGeometry(r, 96, 64);
           this.obstacleMesh = new THREE.Mesh(geom, this.makeMat());
         } else {
-          const placeholder = new THREE.Mesh(new THREE.SphereGeometry(r * 0.5, 16, 8), this.makeMat());
+          const placeholder = new THREE.Mesh(new THREE.SphereGeometry(r * 0.5, 32, 16), this.makeMat());
           this.obstacleMesh = placeholder;
           this.kickRemoteModelLoad(model, r, halfLen);
         }
@@ -1382,7 +1459,7 @@ export class App {
       const { sx, sy, sz } = this.latticeWorld();
       const aabbMin = new THREE.Vector3(-sx * 0.5, -sy * 0.5, -sz * 0.5);
       const aabbSize = new THREE.Vector3(sx, sy, sz);
-      const { W, H, D } = latticeDims(this.config.N);
+      const { W, H, D } = latticeDims(this.config.N, this.config.mode2D);
       // Build pre-solid mask for the floor BEFORE voxelization. This way the
       // flood-fill sees the floor as a wall and any fluid pocket trapped
       // between obstacle and floor is correctly classified as interior.
@@ -1594,7 +1671,7 @@ export class App {
       const { sx, sy, sz } = this.latticeWorld();
       const aabbMin = new THREE.Vector3(-sx * 0.5, -sy * 0.5, -sz * 0.5);
       const aabbMax = new THREE.Vector3( sx * 0.5,  sy * 0.5,  sz * 0.5);
-      const { W, H, D } = latticeDims(this.config.N);
+      const { W, H, D } = latticeDims(this.config.N, this.config.mode2D);
 
       if (this.viewMode === 'particles' && this.particles && this.fluidSurface) {
         // ── Particles (default) ── sphere impostors via FluidSurfaceRenderer

@@ -46,6 +46,18 @@
       <div class="phase-panel" data-phase="setup">
 
         <section class="block">
+          <h3>Mode</h3>
+          <label class="checkbox"><input id="cb-mode2d" type="checkbox" /><span>2D simulation</span></label>
+          <div class="row" id="row-scene2d" hidden>
+            <label class="inline">Scene</label>
+            <select id="sel-scene2d">
+              <option value="circle">Circle (Karman)</option>
+              <option value="cavity">Floor cavity</option>
+            </select>
+          </div>
+        </section>
+
+        <section class="block">
           <h3>Shape</h3>
           <select id="shape-select">
             <optgroup label="Primitives">

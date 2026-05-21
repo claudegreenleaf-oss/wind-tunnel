@@ -701,16 +701,31 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
         exited = true;
         break;
       }
+      // Already inside the obstacle? Possible if (a) the obstacle moved/
+      // scaled mid-flight, or (b) the initial bounding-sphere kill missed
+      // a corner (cylinders, elongated airfoils). Retire immediately so a
+      // fresh particle from the inlet replaces it — without this, the
+      // particle reads zero velocity and pins to the surface forever,
+      // which is exactly the "stuck on the cylinder" cluster.
+      let cxi = u32(clamp(uvwSub.x * f32(W), 0.0, f32(W - 1u)));
+      let cyi = u32(clamp(uvwSub.y * f32(H), 0.0, f32(H - 1u)));
+      let czi = u32(clamp(uvwSub.z * f32(D), 0.0, f32(D - 1u)));
+      if (solidMask[cxi + cyi * W + czi * W * H] == 1u) {
+        needsReseed = true;
+        break;
+      }
       // Sample velocity at current cell.
       let macros = textureSampleLevel(macrosTex, samp, uvwSub, 0.0);
       let vel_world = macros.xyz * (aabbSize / u.dims.xyz);
       var nextPos = pos + vel_world * subDt;
 
       // ANTI-TUNNELING / NO-PHASING: check the LBM solid mask at the
-      // proposed next position BEFORE committing. If we'd land in a solid
-      // voxel, do a binary search backward to find the last fluid position
-      // along the step, then stall there with a small slide along the
-      // tangent so the particle hugs the wall instead of phasing through.
+      // proposed next position BEFORE committing. Bisect to find the
+      // surface crossing, then RETIRE the particle. Letting it "stall at
+      // the wall" produced the visible surface-fuzz / stuck-particle
+      // pile-up the user reported, because near-wall LBM velocity is
+      // ~zero and the tangent component never pushes the particle along
+      // the body.
       let nextUvw = (nextPos - aabbMin) / aabbSize;
       var hit : bool = false;
       if all(nextUvw >= vec3(0.0)) && all(nextUvw <= vec3(1.0)) {
@@ -722,10 +737,11 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
         }
       }
       if hit {
-        // Bisect the segment to find a fluid position just outside the wall.
+        // Bisect (6 iterations → 1/64-step precision) so the visible
+        // settle-point lands on the silhouette, not 1/32 of a step inside it.
         var lo : f32 = 0.0;
         var hi : f32 = 1.0;
-        for (var bi = 0; bi < 5; bi = bi + 1) {
+        for (var bi = 0; bi < 6; bi = bi + 1) {
           let mid = (lo + hi) * 0.5;
           let midPos = pos + (nextPos - pos) * mid;
           let midUvw = (midPos - aabbMin) / aabbSize;
@@ -735,7 +751,8 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
           if (solidMask[mxi + myi * W + mzi * W * H] == 1u) { hi = mid; }
           else { lo = mid; }
         }
-        pos = pos + (nextPos - pos) * lo;     // settle at last fluid sample
+        pos = pos + (nextPos - pos) * lo;
+        needsReseed = true;
         break;
       }
       pos = nextPos;
@@ -871,18 +888,43 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 
 // One-shot pass — invoked when the obstacle shape changes or the user clicks
-// "Reset flow". Marks any particle inside the obstacle bounding sphere for
-// reseed; the next normal advect step does the actual reseed via existing
-// "age >= maxAge" logic.
+// "Reset flow". Marks any particle inside the obstacle for reseed.
+// Now consults the exact LBM solid mask in addition to the bounding sphere,
+// so cylinder corners / airfoil tips / any non-spherical body kill correctly
+// instead of leaving particles trapped inside the mesh until they age out.
 @compute @workgroup_size(64)
 fn cs_kill_inside(@builtin(global_invocation_id) gid : vec3<u32>) {
   let idx = gid.x;
   if idx >= arrayLength(&particles) { return; }
-  let r2 = u.obstacle.w * u.obstacle.w;
-  if r2 <= 0.0 { return; }
   let p = particles[idx];
-  let d = p.xyz - u.obstacle.xyz;
-  if dot(d, d) < r2 {
+  let aabbMin = u.aabbMin.xyz;
+  let aabbMax = u.aabbMax.xyz;
+  let aabbSize = aabbMax - aabbMin;
+  var inside : bool = false;
+
+  // 1) Bounding-sphere fast-path (only meaningful when obstacle.w > 0).
+  let r2 = u.obstacle.w * u.obstacle.w;
+  if r2 > 0.0 {
+    let d = p.xyz - u.obstacle.xyz;
+    if dot(d, d) < r2 * 0.85 { inside = true; }   // sphere kill = unambiguously interior
+  }
+
+  // 2) Exact-mask check — handles non-spherical shapes that the bounding
+  //    sphere misses (cylinder caps, airfoil span, elongated GLTF models).
+  if !inside {
+    let uvw = (p.xyz - aabbMin) / aabbSize;
+    if all(uvw >= vec3(0.0)) && all(uvw <= vec3(1.0)) {
+      let W = u32(u.dims.x);
+      let H = u32(u.dims.y);
+      let D = u32(u.dims.z);
+      let xi = u32(clamp(uvw.x * f32(W), 0.0, f32(W - 1u)));
+      let yi = u32(clamp(uvw.y * f32(H), 0.0, f32(H - 1u)));
+      let zi = u32(clamp(uvw.z * f32(D), 0.0, f32(D - 1u)));
+      if (solidMask[xi + yi * W + zi * W * H] == 1u) { inside = true; }
+    }
+  }
+
+  if inside {
     particles[idx] = vec4(p.xyz, 9999.0);
     prevPos[idx]   = vec4(p.xyz, 0.0);
   }
