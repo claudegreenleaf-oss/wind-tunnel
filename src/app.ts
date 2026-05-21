@@ -57,7 +57,7 @@ export class App {
   private dragCalc: DragCoeffCalc | null = null;
 
   // Active view mode — set by tab bar clicks, consumed in render loop.
-  private viewMode: 'particles' | 'streamlines' | 'volume' | 'slice' = 'particles';
+  private viewMode: 'particles' | 'streamlines' | 'drag' | 'slice' = 'particles';
   /** ms timestamp of the last drag-coefficient compute dispatch. */
   private lastDragComputeMs = 0;
   private sliceActive = false;
@@ -737,7 +737,7 @@ export class App {
       });
     }
 
-    const setMode = (mode: 'particles' | 'streamlines' | 'volume' | 'slice') => {
+    const setMode = (mode: 'particles' | 'streamlines' | 'drag' | 'slice') => {
       this.viewMode = mode;
 
       // Show/hide view-specific floating controls
@@ -756,9 +756,8 @@ export class App {
       this.sliceActive = (mode === 'slice');
       if (this.sliceIndicator) this.sliceIndicator.visible = this.sliceActive;
 
-      // Auto-inject dye when Volumetric tab is active so the volume is non-empty
       if (this.dye) {
-        this.dye.injectAmount = (mode === 'volume') ? 0.7 : this.config.dyeAmount;
+        this.dye.injectAmount = this.config.dyeAmount;
       }
 
       // Reset streamline seeds on switch so ribbons start fresh; show warming hint
@@ -776,7 +775,7 @@ export class App {
         tabs.forEach(t => t.classList.remove('active'));
         tab.classList.add('active');
         movePip(tab);
-        setMode(tab.dataset.mode as 'particles' | 'streamlines' | 'volume' | 'slice');
+        setMode(tab.dataset.mode as 'particles' | 'streamlines' | 'drag' | 'slice');
       });
     });
 
@@ -1007,9 +1006,11 @@ export class App {
     const upstream = vec3(-1, 0, 0);
     const frontness = clamp(dot(normalWorld, upstream), 0, 1);
 
-    // Tuned turbo-style ramp focused on the [0,1] range.
-    const c0 = vec3(0.06, 0.18, 0.55);   // deep blue (back)
-    const c1 = vec3(0.10, 0.85, 0.85);   // cyan
+    // Cp-style turbo ramp.  Brightened low-Cp end so the leeward face is
+    // visible against the dark background — Three.js Standard material with
+    // dim ambient was rendering pure dark blue as nearly invisible.
+    const c0 = vec3(0.30, 0.45, 0.95);   // bright blue (back)
+    const c1 = vec3(0.20, 0.85, 0.95);   // cyan
     const c2 = vec3(0.30, 0.95, 0.30);   // green
     const c3 = vec3(1.00, 0.85, 0.10);   // yellow
     const c4 = vec3(1.00, 0.30, 0.10);   // red (front)
@@ -1029,8 +1030,10 @@ export class App {
       metalness: 0.08,
     });
     mat.colorNode = col;
-    // Add a soft glow so the friction map is visible even in shadow.
-    mat.emissiveNode = col.mul(0.35);
+    // Stronger emissive so the surface heatmap is fully visible from any
+    // camera angle — drag visualisation reads the obstacle as a self-lit
+    // pressure map rather than a darkly shaded mesh.
+    mat.emissiveNode = col.mul(0.85);
     return mat;
   }
 
@@ -1255,9 +1258,6 @@ export class App {
     );
     this.obstacleMesh.scale.setScalar(Math.max(0.01, this.config.scaleMul));
     this.scene.add(this.obstacleMesh);
-    // Enable layer 1 in addition to default 0 so the obstacle can be
-    // re-drawn on top of streamlines via a layer-1 camera pass.
-    this.obstacleMesh.traverse((o) => o.layers.enable(1));
 
     // Update the obstacle bound, then WIPE all particles (per user spec —
     // changing shape should clear the scene and let the new flow develop).
@@ -1615,12 +1615,18 @@ export class App {
         const slDt = this.config.paused ? 0 : 0.08 * this.config.simSpeed;
         this.streamlines.render(view, proj, aabbMin, aabbMax, { W, H, D }, slDt);
 
-      } else if (this.viewMode === 'volume' && this.volumeRenderer && this.dye) {
-        // ── Volumetric heatmap ──
-        // Rebind the dye view each frame: DyeField3D ping-pongs its read/write
-        // textures, so volumeRenderer would otherwise sample the stale half.
-        this.volumeRenderer.setTextures(this.lbm.macrosTextureView, this.dye.currentView);
-        this.volumeRenderer.render(view, proj, camPos, aabbMin, aabbMax, 40);
+      } else if (this.viewMode === 'drag' && this.fluidSurface) {
+        // ── Drag visualization ──
+        // Render the obstacle with surface Cp = (ρ−1)·cs² / (½·uIn²) sampled
+        // from the live LBM density field. Red on windward stagnation faces
+        // (Cp ≈ +1, the main drag-contributing areas); blue on leeward
+        // suction (Cp < 0).
+        if (this.obstacleMesh) {
+          this.obstacleMesh.updateMatrixWorld();
+          this.fluidSurface.setObstacleTransform(view, proj, this.obstacleMesh.matrixWorld);
+        }
+        this.fluidSurface.setObstacleFlowParams(aabbMin, aabbMax, this.config.uIn);
+        this.fluidSurface.renderObstacleOnly();
 
       } else if (this.viewMode === 'slice') {
         // ── Full-viewport slice ──

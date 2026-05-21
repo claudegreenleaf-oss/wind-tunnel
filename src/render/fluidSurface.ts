@@ -129,9 +129,10 @@ export class FluidSurfaceRenderer {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    // Obstacle uniforms: viewMat(64) + projMat(64) + modelMat(64) + upstream(16) = 208
+    // Obstacle uniforms: viewMat(64) + projMat(64) + modelMat(64) + upstream(16)
+    // + aabbMin(16) + aabbMax(16) + scalars(16) = 256 bytes.
     this.obstacleUniformBuf = device.createBuffer({
-      size: 208,
+      size: 256,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -159,8 +160,22 @@ export class FluidSurfaceRenderer {
 
   setMacrosTexture(view: GPUTextureView) {
     this.macrosView = view;
-    // Force composite bind group rebuild on next render.
+    // Force composite + obstacle bind group rebuild on next render.
     this.compositeBG = null;
+    this.obstacleBG  = null;
+  }
+
+  /** Build the obstacle bind group on demand — needs the current macros view. */
+  private ensureObstacleBG() {
+    if (this.obstacleBG || !this.macrosView) return;
+    this.obstacleBG = this.device.createBindGroup({
+      layout: this.obstacleBgl,
+      entries: [
+        { binding: 0, resource: { buffer: this.obstacleUniformBuf } },
+        { binding: 1, resource: this.macrosView },
+        { binding: 2, resource: this.macrosSampler },
+      ],
+    });
   }
 
   private buildPipelines() {
@@ -296,6 +311,8 @@ export class FluidSurfaceRenderer {
     this.obstacleBgl = dev.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '3d' } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
       ],
     });
     const obstacleMod = dev.createShaderModule({ code: OBSTACLE_WGSL, label: 'fluid-obstacle' });
@@ -324,10 +341,9 @@ export class FluidSurfaceRenderer {
         format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less',
       },
     });
-    this.obstacleBG = dev.createBindGroup({
-      layout: this.obstacleBgl,
-      entries: [{ binding: 0, resource: { buffer: this.obstacleUniformBuf } }],
-    });
+    // obstacleBG is rebuilt in setMacrosTexture so we always have the latest
+    // macros view bound (the LBM may swap textures on resize / re-init).
+    this.obstacleBG = null;
 
     // Direct sphere pipeline — opaque colored impostor spheres, depth-tested,
     // straight onto the canvas. No SSFR filter.
@@ -669,6 +685,49 @@ export class FluidSurfaceRenderer {
    * Render particles as colored opaque impostor spheres straight to canvas.
    * No SSFR filter — each particle is an individual lit sphere.
    */
+  /** Draw ONLY the obstacle into the canvas — used by the Drag visualization tab
+   *  where we want the surface heatmap visible without any particle overlay.
+   *  Color is cleared first so the obstacle reads on a clean background. */
+  renderObstacleOnly() {
+    const [w, h] = this.getCanvasSize();
+    if (w <= 0 || h <= 0) return;
+    if (!this.obstacleVtxBuf || this.obstacleVertCount <= 0) return;
+    this.ensureObstacleBG();
+    if (!this.obstacleBG) return;
+
+    // Lazy depth target sized to canvas.
+    if (!this.directDepthTex || this.rtW !== w || this.rtH !== h) {
+      this.directDepthTex?.destroy();
+      this.directDepthTex = this.device.createTexture({
+        label: 'direct-sphere-depth',
+        size: [w, h], format: 'depth24plus',
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      this.rtW = w; this.rtH = h;
+      this.directSphereBG = null;
+    }
+
+    const enc = this.device.createCommandEncoder({ label: 'obstacle-only' });
+    const rpO = enc.beginRenderPass({
+      colorAttachments: [{ view: this.getCanvasView(), loadOp: 'load', storeOp: 'store' }],
+      depthStencilAttachment: {
+        view: this.directDepthTex!.createView(),
+        depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store',
+      },
+    });
+    rpO.setPipeline(this.obstaclePipeline);
+    rpO.setBindGroup(0, this.obstacleBG!);
+    rpO.setVertexBuffer(0, this.obstacleVtxBuf);
+    if (this.obstacleIdxBuf && this.obstacleIdxCount > 0) {
+      rpO.setIndexBuffer(this.obstacleIdxBuf, this.obstacleIdxFormat);
+      rpO.drawIndexed(this.obstacleIdxCount);
+    } else {
+      rpO.draw(this.obstacleVertCount);
+    }
+    rpO.end();
+    this.device.queue.submit([enc.finish()]);
+  }
+
   renderRawSpheres(
     view: THREE.Matrix4,
     proj: THREE.Matrix4,
@@ -737,7 +796,8 @@ export class FluidSurfaceRenderer {
     const depthView = this.directDepthTex!.createView();
 
     // 1) Draw the obstacle (if uploaded), establishing color + depth.
-    if (this.obstacleVtxBuf && this.obstacleVertCount > 0) {
+    this.ensureObstacleBG();
+    if (this.obstacleVtxBuf && this.obstacleVertCount > 0 && this.obstacleBG) {
       const rpO = enc.beginRenderPass({
         colorAttachments: [{ view: canvasView, loadOp: 'load', storeOp: 'store' }],
         depthStencilAttachment: {
@@ -783,6 +843,16 @@ export class FluidSurfaceRenderer {
     buf.set(model.elements, 32);
     buf[48] = -1; buf[49] = 0; buf[50] = 0; buf[51] = 0;   // upstream direction
     this.device.queue.writeBuffer(this.obstacleUniformBuf, 0, buf.buffer);
+  }
+
+  /** AABB + inlet velocity needed for real-LBM Cp sampling on the obstacle. */
+  setObstacleFlowParams(aabbMin: THREE.Vector3, aabbMax: THREE.Vector3, uIn: number) {
+    const buf = new Float32Array(12);
+    buf[0] = aabbMin.x; buf[1] = aabbMin.y; buf[2] = aabbMin.z; buf[3] = 0;
+    buf[4] = aabbMax.x; buf[5] = aabbMax.y; buf[6] = aabbMax.z; buf[7] = 0;
+    buf[8] = uIn;       buf[9] = 0;         buf[10] = 0;        buf[11] = 0;
+    // Write at byte offset 208 (after the three matrices + upstream vec4).
+    this.device.queue.writeBuffer(this.obstacleUniformBuf, 208, buf.buffer);
   }
 
   dispose() {
@@ -1328,13 +1398,19 @@ struct ObstacleUniforms {
   viewMat   : mat4x4f,
   projMat   : mat4x4f,
   modelMat  : mat4x4f,
-  upstream  : vec4f,    // direction the wind comes FROM (-X by default)
+  upstream  : vec4f,    // -X by default
+  aabbMin   : vec4f,
+  aabbMax   : vec4f,
+  scalars   : vec4f,    // x = uIn (inlet velocity, lattice units)
 };
-@group(0) @binding(0) var<uniform> u : ObstacleUniforms;
+@group(0) @binding(0) var<uniform>                u    : ObstacleUniforms;
+@group(0) @binding(1) var                         macrosTex : texture_3d<f32>;
+@group(0) @binding(2) var                         samp : sampler;
 
 struct VOut {
-  @builtin(position) clip : vec4f,
-  @location(0) normalWorld : vec3f,
+  @builtin(position) clip        : vec4f,
+  @location(0) normalWorld       : vec3f,
+  @location(1) worldPos          : vec3f,
 };
 
 @vertex
@@ -1345,16 +1421,18 @@ fn vs_obstacle(@location(0) pos : vec3f, @location(1) norm : vec3f) -> VOut {
   var out : VOut;
   out.clip = u.projMat * vec4f(viewPos, 1.0);
   out.normalWorld = nWorld;
+  out.worldPos    = worldPos;
   return out;
 }
 
+// Turbo colormap for Cp: blue (low pressure / suction) → red (high pressure / stagnation).
 fn turbo5(t : f32) -> vec3f {
   let tt = clamp(t, 0.0, 1.0);
-  let c0 = vec3f(0.06, 0.18, 0.55);   // deep blue (back)
-  let c1 = vec3f(0.10, 0.85, 0.85);   // cyan
-  let c2 = vec3f(0.30, 0.95, 0.30);   // green
+  let c0 = vec3f(0.30, 0.45, 0.95);   // bright blue (Cp < 0, suction)
+  let c1 = vec3f(0.20, 0.85, 0.95);   // cyan
+  let c2 = vec3f(0.30, 0.95, 0.30);   // green (Cp ≈ 0)
   let c3 = vec3f(1.00, 0.85, 0.10);   // yellow
-  let c4 = vec3f(1.00, 0.30, 0.10);   // red (front)
+  let c4 = vec3f(1.00, 0.30, 0.10);   // red (Cp ≈ 1, stagnation)
   if tt < 0.25 { return mix(c0, c1, tt * 4.0); }
   if tt < 0.55 { return mix(c1, c2, (tt - 0.25) * 3.333); }
   if tt < 0.80 { return mix(c2, c3, (tt - 0.55) * 4.0); }
@@ -1362,14 +1440,44 @@ fn turbo5(t : f32) -> vec3f {
 }
 
 @fragment
-fn fs_obstacle(@location(0) n : vec3f) -> @location(0) vec4f {
-  let nw = normalize(n);
-  let frontness = clamp(dot(nw, u.upstream.xyz), 0.0, 1.0);
-  var col = turbo5(frontness);
-  // Soft Lambert lighting for shape readability.
+fn fs_obstacle(in : VOut) -> @location(0) vec4f {
+  let nw = normalize(in.normalWorld);
+  let aabbSize = u.aabbMax.xyz - u.aabbMin.xyz;
+  let uIn = u.scalars.x;
+
+  // Sample density at several points outside the surface along the normal,
+  // pick the most extreme deviation from ρ=1. This finds the boundary-layer
+  // peak (stagnation hotspot or suction trough) more reliably than a single
+  // probe and avoids accidentally sampling a solid LBM cell.
+  let cellWorld = aabbSize.x / 80.0;
+  var dRhoMax = 0.0;
+  for (var k = 1; k <= 4; k = k + 1) {
+    let probe = in.worldPos + nw * cellWorld * f32(k);
+    let uvw = clamp((probe - u.aabbMin.xyz) / aabbSize, vec3f(0.001), vec3f(0.999));
+    let m = textureSampleLevel(macrosTex, samp, uvw, 0.0);
+    let dRho = m.w - 1.0;
+    if (abs(dRho) > abs(dRhoMax)) { dRhoMax = dRho; }
+  }
+  let pLattice = dRhoMax * (1.0 / 3.0);
+  let denom = max(0.5 * uIn * uIn, 1e-5);
+  let cpLBM = pLattice / denom;
+
+  // Fallback: direction-based Cp proxy. The flow hasn't fully developed near
+  // boot, and an obstacle in stagnant fluid would otherwise read as uniform.
+  let frontness = clamp(dot(nw, u.upstream.xyz), -1.0, 1.0);
+
+  // Blend: when |Cp_LBM| is small (≈ undeveloped flow) lean on the direction
+  // proxy; when LBM data is strong, lean on the real measurement.
+  let conf = clamp(abs(cpLBM) * 2.0, 0.0, 1.0);
+  let cp = mix(frontness, cpLBM, conf);
+
+  let cpN = clamp((cp + 1.0) * 0.5, 0.0, 1.0);
+  var col = turbo5(cpN);
+
+  // Subtle Lambert shading for shape readability.
   let lightDir = normalize(vec3f(-0.4, 0.85, 0.7));
   let ndotl = clamp(dot(nw, lightDir), 0.0, 1.0);
-  col = col * (0.55 + 0.55 * ndotl) + vec3f(0.06);
+  col = col * (0.85 + 0.25 * ndotl);
   return vec4f(col, 1.0);
 }
 `;
