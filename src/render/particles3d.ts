@@ -701,20 +701,44 @@ fn cs_advect(@builtin(global_invocation_id) gid : vec3<u32>) {
         exited = true;
         break;
       }
-      // ANTI-TUNNELING: read the LBM solid mask at this cell. If we would
-      // step into a solid voxel, abort the substep loop and reseed — the
-      // particle has hit the obstacle wall.
-      let xi = u32(clamp(uvwSub.x * f32(W), 0.0, f32(W - 1u)));
-      let yi = u32(clamp(uvwSub.y * f32(H), 0.0, f32(H - 1u)));
-      let zi = u32(clamp(uvwSub.z * f32(D), 0.0, f32(D - 1u)));
-      let cellIdx = xi + yi * W + zi * W * H;
-      if (solidMask[cellIdx] == 1u) {
-        exited = true;
-        break;
-      }
+      // Sample velocity at current cell.
       let macros = textureSampleLevel(macrosTex, samp, uvwSub, 0.0);
       let vel_world = macros.xyz * (aabbSize / u.dims.xyz);
-      pos = pos + vel_world * subDt;
+      var nextPos = pos + vel_world * subDt;
+
+      // ANTI-TUNNELING / NO-PHASING: check the LBM solid mask at the
+      // proposed next position BEFORE committing. If we'd land in a solid
+      // voxel, do a binary search backward to find the last fluid position
+      // along the step, then stall there with a small slide along the
+      // tangent so the particle hugs the wall instead of phasing through.
+      let nextUvw = (nextPos - aabbMin) / aabbSize;
+      var hit : bool = false;
+      if all(nextUvw >= vec3(0.0)) && all(nextUvw <= vec3(1.0)) {
+        let nxi = u32(clamp(nextUvw.x * f32(W), 0.0, f32(W - 1u)));
+        let nyi = u32(clamp(nextUvw.y * f32(H), 0.0, f32(H - 1u)));
+        let nzi = u32(clamp(nextUvw.z * f32(D), 0.0, f32(D - 1u)));
+        if (solidMask[nxi + nyi * W + nzi * W * H] == 1u) {
+          hit = true;
+        }
+      }
+      if hit {
+        // Bisect the segment to find a fluid position just outside the wall.
+        var lo : f32 = 0.0;
+        var hi : f32 = 1.0;
+        for (var bi = 0; bi < 5; bi = bi + 1) {
+          let mid = (lo + hi) * 0.5;
+          let midPos = pos + (nextPos - pos) * mid;
+          let midUvw = (midPos - aabbMin) / aabbSize;
+          let mxi = u32(clamp(midUvw.x * f32(W), 0.0, f32(W - 1u)));
+          let myi = u32(clamp(midUvw.y * f32(H), 0.0, f32(H - 1u)));
+          let mzi = u32(clamp(midUvw.z * f32(D), 0.0, f32(D - 1u)));
+          if (solidMask[mxi + myi * W + mzi * W * H] == 1u) { hi = mid; }
+          else { lo = mid; }
+        }
+        pos = pos + (nextPos - pos) * lo;     // settle at last fluid sample
+        break;
+      }
+      pos = nextPos;
     }
     if exited {
       needsReseed = true;

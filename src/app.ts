@@ -57,7 +57,7 @@ export class App {
   private dragCalc: DragCoeffCalc | null = null;
 
   // Active view mode — set by tab bar clicks, consumed in render loop.
-  private viewMode: 'particles' | 'streamlines' | 'drag' | 'slice' = 'particles';
+  private viewMode: 'particles' | 'streamlines' | 'slice' = 'particles';
   /** ms timestamp of the last drag-coefficient compute dispatch. */
   private lastDragComputeMs = 0;
   private sliceActive = false;
@@ -737,7 +737,7 @@ export class App {
       });
     }
 
-    const setMode = (mode: 'particles' | 'streamlines' | 'drag' | 'slice') => {
+    const setMode = (mode: 'particles' | 'streamlines' | 'slice') => {
       this.viewMode = mode;
 
       // Show/hide view-specific floating controls
@@ -775,7 +775,7 @@ export class App {
         tabs.forEach(t => t.classList.remove('active'));
         tab.classList.add('active');
         movePip(tab);
-        setMode(tab.dataset.mode as 'particles' | 'streamlines' | 'drag' | 'slice');
+        setMode(tab.dataset.mode as 'particles' | 'streamlines' | 'slice');
       });
     });
 
@@ -1624,20 +1624,6 @@ export class App {
         const slDt = this.config.paused ? 0 : 0.08 * this.config.simSpeed;
         this.streamlines.render(view, proj, aabbMin, aabbMax, { W, H, D }, slDt);
 
-      } else if (this.viewMode === 'drag' && this.fluidSurface) {
-        // ── Drag visualization (AirShaper-style) ──
-        // The obstacle surface itself is painted with Cp sampled from the
-        // live LBM density field. No volumetric overlay — AirShaper-class
-        // CFD drag plots show ONLY the surface heatmap with the obstacle
-        // floating on a clean background, so drag contributions read at a
-        // glance: red on stagnation (high Cp, large drag contribution),
-        // blue on suction (low Cp, opposite contribution).
-        if (this.obstacleMesh) {
-          this.obstacleMesh.updateMatrixWorld();
-          this.fluidSurface.setObstacleTransform(view, proj, this.obstacleMesh.matrixWorld);
-        }
-        this.fluidSurface.setObstacleFlowParams(aabbMin, aabbMax, this.config.uIn);
-        this.fluidSurface.renderObstacleOnly();
 
       } else if (this.viewMode === 'slice') {
         // ── Full-viewport slice ──
