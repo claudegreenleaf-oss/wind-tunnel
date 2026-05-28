@@ -43,7 +43,7 @@ const FIXED_SCALE = 1e6;
 
 const SHADER = /* wgsl */ `
 struct Uniforms {
-  dims  : vec4<u32>,            // W, H, D, 0
+  dims  : vec4<u32>,            // W, H, D, floorRow
   scalars : vec4<f32>,          // visc (≈ μ at ρ=1), uIn, 0, 0
 };
 @group(0) @binding(0) var<uniform> u : Uniforms;
@@ -75,13 +75,21 @@ fn cs_drag(@builtin(global_invocation_id) gid : vec3<u32>) {
   let W = u.dims.x;
   let H = u.dims.y;
   let D = u.dims.z;
+  let floorRow = u.dims.w;        // y < floorRow ⇒ inside the floor band; skip.
   if (gid.x >= W || gid.y >= H || gid.z >= D) { return; }
+  // Skip the floor — those cells are solid by design, not part of the
+  // obstacle. Including them was the cause of a +191 Cl spike whenever the
+  // floor was enabled: every floor-fluid interface contributed a huge
+  // upward pressure force.
+  if (gid.y < floorRow) { return; }
   let i = idxOf(gid.x, gid.y, gid.z);
 
   // Need fluid cells only.
   if (mask[i] != 0u) { return; }
 
   // Identify which axis neighbours are solid (we contribute one face per).
+  // For the bottom face we ALSO need to ignore floor solids: if (gid.y-1)
+  // is inside the floor band, that's not the obstacle.
   let ix = i32(gid.x);
   let iy = i32(gid.y);
   let iz = i32(gid.z);
@@ -89,7 +97,9 @@ fn cs_drag(@builtin(global_invocation_id) gid : vec3<u32>) {
   let solidPx = (gid.x + 1u  <  W) && mask[idxOf(gid.x + 1u, gid.y, gid.z)] == 1u;
   let solidMx = (gid.x       >= 1u) && mask[idxOf(gid.x - 1u, gid.y, gid.z)] == 1u;
   let solidPy = (gid.y + 1u  <  H) && mask[idxOf(gid.x, gid.y + 1u, gid.z)] == 1u;
-  let solidMy = (gid.y       >= 1u) && mask[idxOf(gid.x, gid.y - 1u, gid.z)] == 1u;
+  // -Y neighbour: skip if it would land in the floor (those cells are solid
+  // but they're the floor, not the obstacle).
+  let solidMy = (gid.y       >= 1u) && (gid.y - 1u >= floorRow) && mask[idxOf(gid.x, gid.y - 1u, gid.z)] == 1u;
   let solidPz = (gid.z + 1u  <  D) && mask[idxOf(gid.x, gid.y, gid.z + 1u)] == 1u;
   let solidMz = (gid.z       >= 1u) && mask[idxOf(gid.x, gid.y, gid.z - 1u)] == 1u;
 
@@ -170,6 +180,7 @@ export class DragCoeffCalc {
   private bindGroup: GPUBindGroup | null = null;
 
   private W = 1; private H = 1; private D = 1;
+  private floorRow = 0;
   private uIn = 0.1;
   private visc = 0.02;
   private readPending = false;
@@ -245,6 +256,9 @@ export class DragCoeffCalc {
 
   setUIn(u: number) { this.uIn = u; }
   setVisc(v: number) { this.visc = v; }
+  /** Floor band height in lattice rows. Cells with y < floorRow are excluded
+   *  from drag/lift integration so the floor doesn't dominate Cl. */
+  setFloorRow(rows: number) { this.floorRow = Math.max(0, Math.min(this.H - 1, Math.round(rows))); }
   setFrontalArea(cells: number) {
     const clamped = Math.max(1, cells);
     // Reset the EMA when the area changes significantly (>15 %). Otherwise a
@@ -256,6 +270,9 @@ export class DragCoeffCalc {
       this.samplesSinceReset = 0;
     }
     this.frontalArea = clamped;
+  }
+  setPlanformArea(cells: number) {
+    this.planformArea = Math.max(1, cells);
   }
 
   /**
@@ -270,7 +287,7 @@ export class DragCoeffCalc {
     const buf = new ArrayBuffer(32);
     const u32 = new Uint32Array(buf);
     const f32 = new Float32Array(buf);
-    u32[0] = this.W; u32[1] = this.H; u32[2] = this.D; u32[3] = 0;
+    u32[0] = this.W; u32[1] = this.H; u32[2] = this.D; u32[3] = this.floorRow;
     f32[4] = this.visc; f32[5] = this.uIn; f32[6] = 0; f32[7] = 0;
     this.device.queue.writeBuffer(this.uniformBuf, 0, buf);
 
@@ -325,7 +342,12 @@ export class DragCoeffCalc {
   }
 
   private computeInstCl(): number {
-    const denom = 0.5 * 1.0 * this.uIn * this.uIn * this.frontalArea;
+    // Cl uses the PLANFORM area as the reference (chord × span for an
+    // airfoil) — the textbook convention for lifting-surface coefficients.
+    // Previously this used `frontalArea`, which is ≈ thickness × span for an
+    // airfoil — that under-estimated the denominator by ≈ chord/thickness and
+    // produced Cl values 3–8× too large.
+    const denom = 0.5 * 1.0 * this.uIn * this.uIn * this.planformArea;
     if (denom < 1e-9) return 0;
     return this.lastFy / denom;
   }

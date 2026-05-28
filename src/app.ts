@@ -1546,6 +1546,7 @@ export class App {
       this.particles?.killParticlesInsideObstacle();
       this.dragCalc?.setFrontalArea(frontalCells);
       this.dragCalc?.setPlanformArea(planformCells);
+      this.dragCalc?.setFloorRow(floorRow);
       // Characteristic length ≈ √(frontal area). Drives Reynolds-number
       // display so the HUD shows U·D/ν, not U·N/4·1/ν. For a circular
       // frontal silhouette this equals D·√(π)/2 ≈ 0.886·D, close enough
